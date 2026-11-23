@@ -31,6 +31,8 @@ POST /api/v1/plates
 }
 ```
 
+If this profile becomes the default, the scale monitor immediately sets the placement trigger to `empty_plate_weight_g + placement_threshold_g`. The default profile can be created/changed only when no plate placement is latched; those write requests return `409` otherwise.
+
 Example explicit live plate tare:
 
 ```json
@@ -135,7 +137,7 @@ Corrected weights must be positive, unique by FoodSeg class, and sum to measured
 
 1. Load `/health`, `/scale/status`, `/scale/tare-config`, `/plates`, `/plates/default`, and `/camera/status` under `/api/v1`.
 2. Poll scale status and show `status`, `stable`, `weight_g`, `simulated`, and scan `state`. Mark synthetic readings visibly as simulated.
-3. Register/select a saved plate, or use the two-step live-tare flow above. Show `live_tare_pending=true` as “place an empty plate, then confirm tare.”
+3. Register/select an accurately measured saved plate, or use the two-step live-tare flow above. In saved-plate mode, placement requires gross weight to exceed the saved empty-plate weight plus the configured minimum net-food threshold; an empty plate can stay on the scale while food is added. Show `live_tare_pending=true` as “place an empty plate, then confirm tare.”
 4. Let the monitor scan automatically. Poll `/scans/active`; `null` means there is no active placement scan. Render the scan state, decision, and result message for progress or user actions.
 5. Show `capture_url` (or `/scans/{id}/capture.jpg`) and `annotated_url` (or `/scans/{id}/annotated.jpg`). A food prediction includes class ID, label, classification confidence, pixel area, region count, segmentation quality, source, and simulation provenance.
 6. Show estimated grams, method, confidence, uncertainty, and review flags from the scan or `/portions`. The experimental area baseline is an estimate, never a measured portion.

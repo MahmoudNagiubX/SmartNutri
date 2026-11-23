@@ -71,6 +71,7 @@ class ScaleMonitoringService:
         self.settings = settings
         self.allow_simulated = allow_simulated
         tare = repository.get_tare_configuration()
+        default_plate = repository.get_default_plate()
         restored_latch = repository.get_monitor_latch()
         self.monitor = ScaleMonitor(
             placement_threshold_g=settings.placement_threshold_g,
@@ -82,6 +83,9 @@ class ScaleMonitoringService:
             live_plate_weight_g=(
                 tare.get("empty_plate_weight_g")
                 if tare.get("mode") == "live_plate" else None
+            ),
+            saved_plate_weight_g=(
+                default_plate.get("empty_plate_weight_g") if default_plate else None
             ),
             live_tare_pending=tare.get("live_tare_pending", False),
             allow_simulated=allow_simulated,
@@ -106,6 +110,12 @@ class ScaleMonitoringService:
         self._task: asyncio.Task | None = None
         self._scan_tasks: set[asyncio.Task] = set()
         self._stop = asyncio.Event()
+
+    def refresh_saved_plate_profile(self) -> None:
+        profile = self.repository.get_default_plate()
+        self.monitor.set_saved_plate_weight(
+            profile.get("empty_plate_weight_g") if profile is not None else None
+        )
 
     @property
     def state(self) -> ScanState:

@@ -313,6 +313,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/plates", response_model=PlateProfile, status_code=status.HTTP_201_CREATED, tags=["plates"])
     async def create_plate(payload: PlateProfileCreate, request: Request) -> dict[str, Any]:
         active = runtime(request)
+        if payload.make_default and active.monitor.monitor.latched:
+            raise HTTPException(status_code=409, detail="remove the current plate before changing the default plate profile")
         reference_image_path = None
         if payload.reference_image_path:
             candidate = Path(payload.reference_image_path).expanduser().resolve()
@@ -332,12 +334,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=422, detail="reference image is invalid") from exc
             reference_image_path = str(candidate)
         try:
-            return active.repository.create_plate_profile(
+            profile = active.repository.create_plate_profile(
                 payload.name,
                 payload.empty_plate_weight_g,
                 reference_image_path=reference_image_path,
                 make_default=payload.make_default,
             )
+            if payload.make_default:
+                active.monitor.refresh_saved_plate_profile()
+            return profile
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -350,8 +355,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.put("/api/v1/plates/default", response_model=PlateProfile, tags=["plates"])
     async def set_default_plate(payload: PlateDefaultRequest, request: Request) -> dict[str, Any]:
+        active = runtime(request)
+        if active.monitor.monitor.latched:
+            raise HTTPException(status_code=409, detail="remove the current plate before changing the default plate profile")
         try:
-            return runtime(request).repository.set_default_plate(payload.plate_profile_id)
+            profile = active.repository.set_default_plate(payload.plate_profile_id)
+            active.monitor.refresh_saved_plate_profile()
+            return profile
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="plate profile not found") from exc
 

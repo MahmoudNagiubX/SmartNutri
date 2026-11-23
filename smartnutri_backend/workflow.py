@@ -104,7 +104,7 @@ class ScanWorkflow:
                 return self._needs_plate_tare(
                     scan_id,
                     "Measured gross weight does not exceed the selected empty plate weight. "
-                    "Remove the plate, add food, and place the loaded plate again, or prepare a live tare first.",
+                    "Verify the plate profile and tare mode before retrying.",
                 )
             net_weight_g = gross_weight_g - plate_tare_weight_g
 

@@ -29,6 +29,7 @@ class ScaleMonitor:
         post_stability_delay_s: float,
         tare_mode: str = "saved_plate",
         live_plate_weight_g: float | None = None,
+        saved_plate_weight_g: float | None = None,
         live_tare_pending: bool = False,
         allow_simulated: bool = False,
         restored_latch: dict | None = None,
@@ -48,8 +49,16 @@ class ScaleMonitor:
             or live_plate_weight_g <= 0
         ):
             raise ValueError("live plate mode requires its saved empty-plate tare weight")
+        if saved_plate_weight_g is not None and (
+            not math.isfinite(saved_plate_weight_g) or saved_plate_weight_g <= 0
+        ):
+            raise ValueError("saved plate weight must be finite and positive")
 
-        self.placement_threshold_g = float(placement_threshold_g)
+        self.minimum_food_weight_threshold_g = float(placement_threshold_g)
+        self.saved_plate_weight_g = (
+            float(saved_plate_weight_g) if saved_plate_weight_g is not None else None
+        )
+        self.placement_threshold_g = self.minimum_food_weight_threshold_g
         self.removal_threshold_g = float(removal_threshold_g)
         self.stable_confirmations = stable_confirmations
         self.removal_confirmations = removal_confirmations
@@ -69,6 +78,7 @@ class ScaleMonitor:
         self._stable_count = 0
         self._removal_count = 0
         self._stable_since: float | None = None
+        self._refresh_placement_threshold()
 
     @property
     def latched(self) -> bool:
@@ -88,6 +98,17 @@ class ScaleMonitor:
         self.live_tare_pending = True
         self._reset_candidate(preserve_candidate=False)
 
+    def set_saved_plate_weight(self, plate_weight_g: float | None) -> None:
+        if self.latched:
+            raise RuntimeError("remove the current plate before changing the default plate profile")
+        if plate_weight_g is not None and (
+            not math.isfinite(plate_weight_g) or plate_weight_g <= 0
+        ):
+            raise ValueError("saved plate weight must be finite and positive")
+        self.saved_plate_weight_g = float(plate_weight_g) if plate_weight_g is not None else None
+        self._refresh_placement_threshold()
+        self._reset_candidate(preserve_candidate=False)
+
     def set_live_tare(self, plate_weight_g: float) -> None:
         if not math.isfinite(plate_weight_g) or plate_weight_g <= 0:
             raise ValueError("live plate tare weight must be finite and positive")
@@ -96,6 +117,7 @@ class ScaleMonitor:
         self.tare_mode = "live_plate"
         self.live_plate_weight_g = float(plate_weight_g)
         self.live_tare_pending = False
+        self._refresh_placement_threshold()
         self._reset_candidate(preserve_candidate=False)
 
     def set_platform_tare(self) -> None:
@@ -104,7 +126,16 @@ class ScaleMonitor:
         self.tare_mode = "saved_plate"
         self.live_plate_weight_g = None
         self.live_tare_pending = False
+        self._refresh_placement_threshold()
         self._reset_candidate(preserve_candidate=False)
+
+    def _refresh_placement_threshold(self) -> None:
+        plate_offset = (
+            self.saved_plate_weight_g
+            if self.tare_mode == "saved_plate" and self.saved_plate_weight_g is not None
+            else 0.0
+        )
+        self.placement_threshold_g = self.minimum_food_weight_threshold_g + plate_offset
 
     def observe(
         self,

@@ -43,6 +43,26 @@ class ScaleMonitorTests(unittest.TestCase):
         self.assertEqual(monitor.state, ScanState.IDLE)
         self.assertIsNone(monitor.active_placement_key)
 
+    def test_saved_plate_mass_is_excluded_from_food_placement_threshold(self):
+        monitor = self.monitor(
+            saved_plate_weight_g=300,
+            allow_simulated=True,
+            post_stability_delay_s=0,
+        )
+        self.assertEqual(monitor.placement_threshold_g, 320)
+        for index in range(4):
+            self.assertIsNone(monitor.observe(reading(300), now=index / 10))
+        self.assertEqual(monitor.state, ScanState.IDLE)
+        self.assertIsNone(monitor.active_placement_key)
+
+        monitor.observe(reading(750, stable=False), now=0.5)
+        self.assertIsNone(monitor.observe(reading(750), now=0.6))
+        event = monitor.observe(reading(750), now=0.7)
+        self.assertEqual(event.kind, "capture")
+        self.assertEqual(event.observation.weight_g, 750)
+        for index in range(4):
+            self.assertIsNone(monitor.observe(reading(750), now=0.8 + index / 10))
+
     def test_requires_consecutive_stability_and_settling_delay(self):
         monitor = self.monitor()
         monitor.observe(reading(750, stable=False), now=0.0)

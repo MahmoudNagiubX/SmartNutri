@@ -23,7 +23,7 @@ Android phone -- private snapshot --> CameraService
 ```
 
 - `smartnutri_weight` is the existing HTTP client for the ESP32. The backend polling worker uses bounded GET retries from that client and continues polling after temporary errors.
-- `scale_service.py` contains the background monitor, mock scale, source-aware observation conversion, explicit tare handling, and placement dispatch.
+- `scale_service.py` contains the background monitor, mock scale, source-aware observation conversion, explicit tare handling, and placement dispatch. When a saved plate profile is selected, placement detection adds the empty plate's weight to the minimum net-food trigger; live-tare readings use the minimum directly.
 - `camera.py` provides mock, file-test, and private-LAN IP snapshot adapters. It validates size, format, exposure, sharpness, and EXIF orientation. It normalizes captured frames to RGB JPEG and saves only one selected frame per scan.
 - `vision.py` has the multi-food mock predictor and lazy local-only SegFormer adapter. The real adapter checks canonical FoodSeg103 label anchors and exact class IDs `0..103`, verifies the loaded model's complete `id2label`/`label2id` and 104-channel head, and uses preprocessing metadata stored with the checkpoint. It defaults to CPU and never downloads a checkpoint. The mock fixture's IDs 1/2/3 cannot pass real-label anchor validation.
 - `portion.py` exposes the `PortionEstimator` interface. Its current estimator is an explicitly experimental pixel-area baseline; it always asks for review.
@@ -67,7 +67,7 @@ These papers inform the architecture; they do not validate this implementation. 
 
 ## BE-02 verification snapshot
 
-On 2026-11-23, the backend, repository, scale-client, camera, agent, nutrition, scan, and CV-contract regression modules passed **113 tests** in the backend-only environment. The image-processing suite passed **18 tests** in the project environment. The local checkpoint smoke test passed on CPU with the synthetic mock-camera image and a 104-channel FoodSeg103 result. These results validate software paths and model loading only; no physical scale/camera test or real-scene accuracy evaluation was performed. The mock placement and portion values in tests are synthetic.
+On 2026-11-23, the backend, repository, scale-client, camera, agent, nutrition, scan, and CV-contract regression modules passed **115 tests** in the backend-only environment. The image-processing suite passed **18 tests** in the project environment. The local checkpoint smoke test passed on CPU with the synthetic mock-camera image and a 104-channel FoodSeg103 result. These results validate software paths and model loading only; no physical scale/camera test or real-scene accuracy evaluation was performed. The mock placement and portion values in tests are synthetic.
 
 ## Running tests
 

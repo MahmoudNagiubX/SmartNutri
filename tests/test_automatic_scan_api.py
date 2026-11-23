@@ -1,4 +1,3 @@
-import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -93,6 +92,16 @@ class AutomaticScanApiTests(unittest.TestCase):
         )
         self.assertEqual(duplicate.status_code, 409)
 
+        other_plate = self.client.post(
+            "/api/v1/plates",
+            json={"name": "second plate", "empty_plate_weight_g": 450, "make_default": False},
+        )
+        changed_default = self.client.put(
+            "/api/v1/plates/default",
+            json={"plate_profile_id": other_plate.json()["id"]},
+        )
+        self.assertEqual(changed_default.status_code, 409)
+
     def test_case_b_live_plate_tare_is_applied_once(self):
         runtime = self.client.app.state.runtime
         runtime.scale_client.set_weight(300)
@@ -145,38 +154,36 @@ class AutomaticScanApiTests(unittest.TestCase):
         self.assertEqual(scan["plate_tare_weight_g"], 300)
         self.assertEqual(scan["measured_net_food_weight_g"], 450)
 
-    def test_saved_plate_empty_first_requires_remove_and_replacement_before_food_scan(self):
-        import asyncio
-
-        self.client.post(
+    def test_saved_plate_empty_first_waits_for_food_then_scans_without_replacement(self):
+        profile = self.client.post(
             "/api/v1/plates",
             json={"name": "test plate", "empty_plate_weight_g": 300, "make_default": True},
         )
-        first = self.client.post(
+        self.assertEqual(profile.status_code, 201, profile.text)
+        runtime = self.client.app.state.runtime
+
+        empty_placement = self.client.post(
             "/api/v1/scans/mock-placement", json={"gross_weight_g": 300}
         )
-        self.assertEqual(first.status_code, 200, first.text)
-        empty_scan = first.json()["scan"]
-        self.assertEqual(empty_scan["decision"], "REQUEST_PLATE_TARE")
-        self.assertEqual(empty_scan["error_code"], "plate_tare_required")
-        self.assertIn("remove", empty_scan["result_message"].lower())
+        self.assertEqual(empty_placement.status_code, 409)
+        self.assertEqual(runtime.repository.list_scans(), [])
 
-        food_added_without_removal = self.client.post(
-            "/api/v1/scans/mock-placement", json={"gross_weight_g": 750}
-        )
-        self.assertEqual(food_added_without_removal.status_code, 409)
-        self.assertEqual(len(self.client.get("/api/v1/scans").json()), 1)
-
-        asyncio.run(self.client.app.state.runtime.monitor.inject_mock_removal())
         loaded = self.client.post(
             "/api/v1/scans/mock-placement", json={"gross_weight_g": 750}
         )
         self.assertEqual(loaded.status_code, 200, loaded.text)
-        scan = loaded.json()["scan"]
+        scans = runtime.repository.list_scans()
+        self.assertEqual(len(scans), 1)
+        scan = runtime.repository.get_scan(scans[0]["id"])
+        self.assertIsNotNone(scan)
         self.assertEqual(scan["measured_gross_weight_g"], 750)
         self.assertEqual(scan["plate_tare_weight_g"], 300)
         self.assertEqual(scan["measured_net_food_weight_g"], 450)
-        self.assertEqual(len(self.client.get("/api/v1/scans").json()), 2)
+        self.assertEqual(runtime.monitor.state.value, "WAITING_FOR_REMOVAL")
+        self.assertEqual(
+            self.client.post("/api/v1/scans/mock-placement", json={"gross_weight_g": 750}).status_code,
+            409,
+        )
 
     def test_no_plate_profile_requests_registration_without_inventing_net_weight(self):
         response = self.client.post(
@@ -197,11 +204,8 @@ class AutomaticScanApiTests(unittest.TestCase):
         response = self.client.post(
             "/api/v1/scans/mock-placement", json={"gross_weight_g": 750}
         )
-        scan = response.json()["scan"]
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(scan["decision"], "REQUEST_PLATE_TARE")
-        self.assertIsNone(scan["measured_net_food_weight_g"])
-        self.assertIsNone(scan["meal"])
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.client.app.state.runtime.repository.list_scans(), [])
 
     def test_missing_verified_nutrition_mapping_never_fabricates_totals(self):
         self.client.post(

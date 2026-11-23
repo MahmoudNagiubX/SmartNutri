@@ -48,6 +48,27 @@ class BackendApiTests(unittest.TestCase):
         self.assertEqual(len(listed.json()), 1)
         self.assertEqual(self.client.get("/api/v1/plates/default").json()["id"], plate["id"])
 
+    def test_default_plate_updates_automatic_placement_threshold(self):
+        first = self.client.post(
+            "/api/v1/plates",
+            json={"name": "small plate", "empty_plate_weight_g": 300, "make_default": True},
+        )
+        second = self.client.post(
+            "/api/v1/plates",
+            json={"name": "large plate", "empty_plate_weight_g": 400, "make_default": False},
+        )
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        runtime = self.client.app.state.runtime
+        self.assertEqual(runtime.monitor.monitor.placement_threshold_g, 320)
+
+        changed = self.client.put(
+            "/api/v1/plates/default", json={"plate_profile_id": second.json()["id"]}
+        )
+        self.assertEqual(changed.status_code, 200, changed.text)
+        self.assertEqual(runtime.monitor.monitor.placement_threshold_g, 420)
+        self.assertEqual(changed.json()["id"], second.json()["id"])
+
     def test_plate_weight_and_name_are_validated(self):
         response = self.client.post(
             "/api/v1/plates",

@@ -18,7 +18,7 @@ IDLE
   -> IDLE                    stable removal is confirmed
 ```
 
-The monitor applies configurable thresholds (`placement_threshold_g=20`, `removal_threshold_g=10` by default), consecutive stable confirmations (2), removal confirmations (3), polling interval (0.25 seconds), and post-stability delay (1 second). HX711 readings must already report `stable`; backend confirmations and the additional delay add another guard. Invalid, unstable, overload, disconnected, and missing readings do not trigger a scan. A temporary network failure resets the candidate stability streak without turning the error into a weight.
+The monitor applies configurable thresholds (`placement_threshold_g=20` minimum net-food grams and `removal_threshold_g=10` by default), consecutive stable confirmations (2), removal confirmations (3), polling interval (0.25 seconds), and post-stability delay (1 second). In saved-plate mode with a selected profile, it adds the profile's empty weight to the placement threshold; in live-tare mode the reading is already net and only the configured minimum applies. HX711 readings must already report `stable`; backend confirmations and the additional delay add another guard. Invalid, unstable, overload, disconnected, and missing readings do not trigger a scan. A temporary network failure resets the candidate stability streak without turning the error into a weight.
 
 Each scan has a unique `placement_key`. The database inserts the scan and persisted latch atomically. When the backend restarts with a latched placement, it enters `WAITING_FOR_REMOVAL`, marks an interrupted in-progress scan for review, and does not retrigger on a plate that stayed in place. If removal is confirmed during capture or inference, a cancellation event prevents the in-flight scan from saving a new image or meal.
 
@@ -35,7 +35,7 @@ net_food_weight_g = measured_gross_weight_g - saved_plate_weight_g
 If no default profile exists, or gross weight is less than or equal to the profile weight, the agent requests plate registration/correction. It does not create negative mass or take a photo for an invalid net result.
 If a profile is wrong but still lighter than the loaded gross weight, weight arithmetic alone cannot detect that bias; re-weigh the empty plate and correct the profile.
 
-In saved-plate mode, placing the empty plate by itself is an invalid zero-food placement. The backend requests a valid loaded placement and latches the current placement to prevent duplicate scans. Remove the empty plate, add food, then place the loaded plate again; the new stable placement is scanned once and the saved plate mass is subtracted once. Adding food while that first placement is still latched does not create a second automatic scan. This is a known interaction constraint for the current MVP, so the UI should surface the remove-and-replace instruction.
+In saved-plate mode, placing the empty plate by itself does not trigger a scan. The monitor waits until stable gross weight reaches `saved_plate_weight_g + placement_threshold_g`; if the user adds food while the plate remains on the scale, that stable increase triggers one scan. The full gross reading is passed to the workflow and the saved plate mass is subtracted once. The monitor then remains latched until confirmed removal, preventing repeated scans while the loaded plate stays in place. A wrong or overweight plate profile can hold the trigger threshold too high, so the dashboard must show the selected profile and live gross reading clearly.
 
 ### Live plate tare
 
