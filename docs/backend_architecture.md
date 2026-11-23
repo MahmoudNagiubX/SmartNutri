@@ -50,9 +50,9 @@ Both measured net meal weight and per-food estimates are retained. If a portion 
 
 ## Runtime and security defaults
 
-Run Uvicorn bound to `127.0.0.1`. Auto-scan defaults off and must be explicitly enabled after the source configuration is ready. CORS uses explicit origins and rejects wildcards. The camera adapter accepts only private, loopback, or `.local` snapshot hosts and rejects redirects outside that set. Captured images are size-limited and stored outside Git. Real tare, calibration, recapture, nutrient-record writes, and meal corrections require `X-SmartNutri-Control-Token`; real control requests fail closed if no token is configured. Mock mode is explicitly simulated and does not call ESP32 hardware.
+Start the API through `python -m smartnutri_backend.server`, which binds to `127.0.0.1` by default. A LAN deployment must set `SMARTNUTRI_API_HOST` to one explicit RFC1918 IPv4 address; wildcard, public, hostname, and IPv6 binds are rejected. Auto-scan defaults off and must be explicitly enabled after the source configuration is ready. CORS is disabled by default; optional explicit origins are only for a separate browser client. The camera adapter accepts only private, loopback, or `.local` snapshot hosts and rejects redirects outside that set. Captured images are size-limited and stored outside Git. Real tare, calibration, recapture, nutrient-record writes, and meal corrections require `X-SmartNutri-Control-Token`; real control requests fail closed if no token is configured. Mock mode is explicitly simulated and does not call ESP32 hardware.
 
-For deployment on a LAN, the operator must deliberately change the bind address, firewall scope, CORS allowlist, and control token. Do not expose the local API to the public internet.
+For a trusted-Wi-Fi Flutter client, bind only to the laptop's Wi-Fi IPv4 and scope inbound TCP/8000 to the Private firewall profile and the phone or trusted subnet. Do not add router port forwarding or expose the local API to the public internet. The Android client uses the REST/JSON and image contracts documented in [Flutter Android integration](flutter_android_integration.md); camera capture remains a separate camera-service adapter.
 
 ## Research relationship and evidence boundaries
 

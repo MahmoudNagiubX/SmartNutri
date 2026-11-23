@@ -1,6 +1,6 @@
 # SmartNutri Backend API v1
 
-Base URL for the default local process: `http://127.0.0.1:8000`. The service binds to loopback in the documented command. Responses use JSON except image resources. CORS allowlists explicit origins; credentials are disabled. Image requests are capped at 8 MiB by default and checked for format, dimensions, brightness, clipping, and sharpness before analysis.
+Base URL for the default local process: `http://127.0.0.1:8000`. The supported launcher binds to loopback by default; a trusted-Wi-Fi deployment must explicitly bind to the laptop's private IPv4 address and scope the host firewall. Responses use JSON except image resources. CORS is disabled by default because the intended client is native Flutter; explicit browser origins can be configured when needed. Image requests are capped at 8 MiB by default and checked for format, dimensions, brightness, clipping, and sharpness before analysis. FastAPI publishes typed response schemas at `/openapi.json`.
 
 ## Scale, tare, and plates
 
@@ -85,7 +85,7 @@ Nutrition record example (only use after verifying the source data independently
 ```json
 POST /api/v1/nutrition/records
 {
-  "class_id": 1,
+  "class_id": 66,
   "food_identity": "verified food identity",
   "preparation_state": "documented preparation",
   "kcal_per_100g": 0,
@@ -106,9 +106,9 @@ Correction example:
 POST /api/v1/meals/{meal_id}/corrections
 {
   "items": [
-    { "class_id": 1, "label": "rice", "weight_g": 150, "nutrition_record_id": "optional-verified-record-id" },
-    { "class_id": 2, "label": "chicken", "weight_g": 200 },
-    { "class_id": 3, "label": "fries", "weight_g": 100 }
+    { "class_id": 66, "label": "rice", "weight_g": 150, "nutrition_record_id": "optional-verified-record-id" },
+    { "class_id": 48, "label": "chicken duck", "weight_g": 200 },
+    { "class_id": 3, "label": "french fries", "weight_g": 100 }
   ]
 }
 ```
@@ -117,7 +117,7 @@ Corrected weights must be positive, unique by FoodSeg class, and sum to measured
 
 ## Control and deployment
 
-Real `POST /api/v1/scale/tare`, `/api/v1/scale/calibrate`, scan/camera recapture, nutrition-record writes, and meal corrections require `X-SmartNutri-Control-Token: <secret>`. Set `SMARTNUTRI_CONTROL_TOKEN` outside the repository; real controls fail closed when it is unset. Mock-mode control calls are explicitly simulated and never actuate hardware. Keep the service on loopback unless there is an explicit LAN deployment plan with firewall and origin restrictions. Do not commit tokens, camera credentials, runtime images, database files, or nutrient-source credentials.
+Real `POST /api/v1/scale/tare`, `/api/v1/scale/calibrate`, scan/camera recapture, nutrition-record writes, and meal corrections require `X-SmartNutri-Control-Token: <secret>`. Set `SMARTNUTRI_CONTROL_TOKEN` outside the repository; real controls fail closed when it is unset. Mock-mode control calls are explicitly simulated and never actuate hardware. The supported server launcher defaults to `127.0.0.1`; for a trusted Wi-Fi client, set `SMARTNUTRI_API_HOST` to the laptop's explicit RFC1918 IPv4 address and allow only the Android device or trusted home subnet through the Windows Private-profile firewall. Do not bind to `0.0.0.0` or expose the API publicly. CORS is disabled by default; configure `SMARTNUTRI_CORS_ORIGINS` only for an intentional browser client. Do not commit tokens, camera credentials, runtime images, database files, or nutrient-source credentials. See [Flutter Android integration](flutter_android_integration.md) for the mobile flow and Android network configuration.
 
 Common environment configuration:
 
@@ -134,6 +134,7 @@ Common environment configuration:
 | `SMARTNUTRI_MIN_CLASSIFICATION_CONFIDENCE` | Minimum food-class confidence before area allocation; default is `0.55`. |
 | `SMARTNUTRI_PORTION_REVIEW_UNCERTAINTY_FRACTION` | Maximum per-item uncertainty as a fraction of total net weight before agent review; default is `0.20`. |
 | `SMARTNUTRI_CONTROL_TOKEN` | Secret required for real write/control operations. |
-| `SMARTNUTRI_CORS_ORIGINS` | Comma-separated explicit browser origins; wildcards are rejected. |
+| `SMARTNUTRI_API_HOST` / `SMARTNUTRI_API_PORT` | Server launcher address and port; defaults to `127.0.0.1:8000`, and non-private/public binds are rejected. |
+| `SMARTNUTRI_CORS_ORIGINS` | Optional comma-separated explicit browser origins; empty by default and wildcards are rejected. Native Flutter clients do not use CORS. |
 
 For hardware, use `SMARTNUTRI_SCALE_MODE=real`, set the ESP32 base URL, use the phone app's private snapshot URL, and keep auto-scan disabled until tare, calibration, camera, and local inference have been checked individually. Set `SMARTNUTRI_AUTO_SCAN=true` only after those checks. Real SegFormer mode requires an already-present local FoodSeg103 checkpoint with training metadata; if missing or inconsistent, inference fails closed for review.
