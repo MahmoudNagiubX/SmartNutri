@@ -375,3 +375,75 @@ class SQLiteRepository:
         assert result is not None
         return result
 
+    def add_nutrition_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        record_id = str(uuid.uuid4())
+        now = utc_now()
+        values = (
+            record_id,
+            record.get("class_id"),
+            record["food_identity"],
+            record["preparation_state"],
+            float(record["kcal_per_100g"]),
+            float(record["protein_g_per_100g"]),
+            float(record["carbohydrates_g_per_100g"]),
+            float(record["fat_g_per_100g"]),
+            record["source"],
+            record["version"],
+            int(bool(record.get("verified", False))),
+            now,
+        )
+        with self._lock, self._connection:
+            try:
+                self._connection.execute(
+                    """INSERT INTO nutrition_records
+                       (id, class_id, food_identity, preparation_state, kcal_per_100g,
+                        protein_g_per_100g, carbohydrates_g_per_100g, fat_g_per_100g,
+                        source, version, verified, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    values,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("nutrition record conflicts with an existing record or schema constraint") from exc
+            row = self._connection.execute(
+                "SELECT * FROM nutrition_records WHERE id = ?", (record_id,)
+            ).fetchone()
+        return self._decode_nutrition_record(row) or {}
+
+    @classmethod
+    def _decode_nutrition_record(cls, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        result = cls._dict(row)
+        if result is not None:
+            result["verified"] = bool(result["verified"])
+        return result
+
+    def get_nutrition_record(self, record_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM nutrition_records WHERE id = ?", (record_id,)
+            ).fetchone()
+        return self._decode_nutrition_record(row)
+
+    def list_nutrition_records(
+        self,
+        *,
+        class_id: int | None = None,
+        verified_only: bool = False,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if class_id is not None:
+            clauses.append("class_id = ?")
+            parameters.append(class_id)
+        if verified_only:
+            clauses.append("verified = 1")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        parameters.append(limit)
+        with self._lock:
+            rows = self._connection.execute(
+                f"SELECT * FROM nutrition_records{where} ORDER BY created_at DESC LIMIT ?",
+                parameters,
+            ).fetchall()
+        return [self._decode_nutrition_record(row) or {} for row in rows]
+
