@@ -76,9 +76,24 @@ The default evaluates the official validation split. It writes `metrics.json` an
 
 This saves side-by-side source image, ground-truth overlay, and prediction overlay PNGs under the checkpoint's `visualizations` folder.
 
-## ESP32 scale and future nutrition agent
+## Automatic multi-food backend
 
-The independent ESP32/HX711 scale module and Python client are documented in [docs/weight_scale.md](docs/weight_scale.md). The proposed handoff from FoodSeg103 predictions and stable real scale readings to a future laptop-side nutrition agent is documented in [docs/integration_contracts.md](docs/integration_contracts.md). The FastAPI service, model-serving endpoint, nutrition database, meal state, and AI agent are not implemented in this repository yet.
+The laptop-side BE-01 backend now provides a versioned FastAPI API, background scale monitor, saved-plate and explicit live-plate tare modes, phone/file/mock camera adapters, local-only SegFormer inference, an experimental portion estimator, a transparent nutrition decision policy, verified-record nutrition calculations, and SQLite meal history/corrections. The API and runtime are independent of the existing training process. No frontend, production nutrition dataset, or validated portion-weight model is included.
+
+Read the implementation notes in [backend architecture](docs/backend_architecture.md), [automatic scan flow](docs/automatic_scan_flow.md), [portion estimation](docs/portion_estimation.md), [agent policy](docs/ai_agent.md), and [API reference](docs/api_reference.md). These whole-plate contracts supersede the earlier sequential-addition proposal in [integration_contracts.md](docs/integration_contracts.md). The independent ESP32 module remains documented in [weight_scale.md](docs/weight_scale.md).
+
+Install the backend into a separate Python environment so the CUDA training environment is not changed. From PowerShell:
+
+```powershell
+$backendEnv = Join-Path $env:LOCALAPPDATA 'SmartNutriBackendVenv'
+python -m venv $backendEnv
+& (Join-Path $backendEnv 'Scripts\python.exe') -m pip install -r .\smartnutri_backend\requirements.txt
+$env:SMARTNUTRI_SCALE_MODE = 'mock'
+$env:SMARTNUTRI_AUTO_SCAN = 'false'
+& (Join-Path $backendEnv 'Scripts\python.exe') -m uvicorn smartnutri_backend.api:app --host 127.0.0.1 --port 8000
+```
+
+The mock scan endpoint accepts only synthetic test values and labels its responses. Real scale control requires `SMARTNUTRI_CONTROL_TOKEN`; set it outside Git. The backend defaults to loopback, explicit CORS origins, a mock camera/CV adapter, and auto-scan disabled. Use local checkpoint metadata and `SMARTNUTRI_CV_MODE=segformer` for real inference; model loading is lazy and local-only.
 
 To regenerate the actual-source preprocessing figure without a model or training:
 

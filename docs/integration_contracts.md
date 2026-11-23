@@ -69,3 +69,13 @@ When a FastAPI service is added, validate incoming/outgoing objects at the API b
 5. Meal state stores the selected prediction, associated portion mass, source record, and calculated nutrients.
 
 No agent decision, nutrition lookup, calibration, or meal mutation should run on the ESP32. The camera, ring light, scale, and laptop have independent power/data roles; this contract does not specify a camera transport or model-serving endpoint.
+
+## BE-01 v2 whole-plate workflow (current backend contract)
+
+The sequential-addition design above is retained as historical context only. BE-01 v2 replaces that workflow with automatic whole-plate analysis: one stable plate placement triggers one overhead RGB capture, and semantic segmentation returns every visible FoodSeg103 class in the image. A plate may contain several ingredients before the first capture; no per-food addition events are required.
+
+The backend uses either a saved empty-plate profile (`net_food_weight_g = gross_weight_g - saved_plate_weight_g`) or an explicitly user-confirmed live tare performed while the plate is empty (`net_food_weight_g = post-tare reading`). The same tare is never subtracted twice. Without a known tare, the system requests plate registration. A reading is eligible only when it is stable, in grams, finite, and from a connected/tared/calibrated HX711, except that simulated test readings are separately marked and never presented as physical measurements.
+
+Semantic class IDs remain `1..103` for food and `0` for background. FoodSeg103 `id2label` and checkpoint metadata are loaded locally for real inference. Classification confidence, segmentation quality, and portion-estimation uncertainty are distinct values. The initial visual-area portion baseline is experimental, requires review, and does not claim that pixel area equals mass. Nutrition estimates require an operator-maintained verified per-100 g identity/preparation/source/version record; missing or ambiguous mappings yield no invented totals.
+
+See [automatic_scan_flow.md](automatic_scan_flow.md), [portion_estimation.md](portion_estimation.md), [ai_agent.md](ai_agent.md), and [api_reference.md](api_reference.md) for the implemented state machine, review policy, and routes.
