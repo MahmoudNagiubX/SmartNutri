@@ -28,6 +28,7 @@ class ScaleMonitor:
         removal_confirmations: int,
         post_stability_delay_s: float,
         tare_mode: str = "saved_plate",
+        live_plate_weight_g: float | None = None,
         allow_simulated: bool = False,
         restored_latch: dict | None = None,
     ) -> None:
@@ -40,6 +41,12 @@ class ScaleMonitor:
             raise ValueError("confirmation counts must be positive")
         if tare_mode not in {"saved_plate", "live_plate"}:
             raise ValueError("tare_mode must be saved_plate or live_plate")
+        if tare_mode == "live_plate" and (
+            live_plate_weight_g is None
+            or not math.isfinite(live_plate_weight_g)
+            or live_plate_weight_g <= 0
+        ):
+            raise ValueError("live plate mode requires its saved empty-plate tare weight")
 
         self.placement_threshold_g = float(placement_threshold_g)
         self.removal_threshold_g = float(removal_threshold_g)
@@ -47,6 +54,7 @@ class ScaleMonitor:
         self.removal_confirmations = removal_confirmations
         self.post_stability_delay_s = float(post_stability_delay_s)
         self.tare_mode = tare_mode
+        self.live_plate_weight_g = float(live_plate_weight_g) if live_plate_weight_g is not None else None
         self.allow_simulated = allow_simulated
         latch = restored_latch or {}
         self.active_placement_key = latch.get("placement_key") if latch.get("latched") else None
@@ -147,7 +155,9 @@ class ScaleMonitor:
             self._removal_count = 0
             return None
         if self.tare_mode == "live_plate":
-            removed_sample = weight <= self.removal_threshold_g
+            assert self.live_plate_weight_g is not None
+            tolerance_g = min(self.removal_threshold_g, self.live_plate_weight_g * 0.05)
+            removed_sample = weight <= -(self.live_plate_weight_g - tolerance_g)
         else:
             removed_sample = abs(weight) <= self.removal_threshold_g
         if not removed_sample:

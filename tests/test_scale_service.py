@@ -115,6 +115,7 @@ class ScaleMonitoringServiceTests(unittest.IsolatedAsyncioTestCase):
             settings=self.settings,
             allow_simulated=True,
         )
+        self.assertEqual(service.monitor.live_plate_weight_g, 300)
         self.client.set_weight(0)
         with self.assertRaisesRegex(RuntimeError, "remove the live-tared empty plate"):
             service.configure_tare("platform_empty")

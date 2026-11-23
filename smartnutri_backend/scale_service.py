@@ -79,6 +79,10 @@ class ScaleMonitoringService:
             removal_confirmations=settings.removal_confirmations,
             post_stability_delay_s=settings.post_stability_delay_s,
             tare_mode=tare.get("mode", "saved_plate"),
+            live_plate_weight_g=(
+                tare.get("empty_plate_weight_g")
+                if tare.get("mode") == "live_plate" else None
+            ),
             allow_simulated=allow_simulated,
             restored_latch=restored_latch,
         )
@@ -223,7 +227,12 @@ class ScaleMonitoringService:
     async def inject_mock_removal(self) -> None:
         if not self.allow_simulated or not isinstance(self.client, MockScaleClient):
             raise RuntimeError("mock removal is available only when the backend scale mode is mock")
-        observation = self.client.set_weight(0.0)
+        removal_weight_g = (
+            -self.monitor.live_plate_weight_g
+            if self.monitor.tare_mode == "live_plate" and self.monitor.live_plate_weight_g is not None
+            else 0.0
+        )
+        observation = self.client.set_weight(removal_weight_g)
         start = time.monotonic()
         for index in range(self.settings.removal_confirmations):
             await self.observe(observation, now=start + index * 0.1)
@@ -271,4 +280,5 @@ class ScaleMonitoringService:
             live_tare_at=(datetime.now(timezone.utc).isoformat() if tare_mode == "live_plate" else None),
         )
         self.monitor.tare_mode = tare_mode
+        self.monitor.live_plate_weight_g = empty_plate_weight_g if tare_mode == "live_plate" else None
         return self.repository.get_tare_configuration()

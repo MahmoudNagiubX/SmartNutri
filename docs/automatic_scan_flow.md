@@ -39,7 +39,7 @@ If a profile is wrong but still lighter than the loaded gross weight, weight ari
 
 Tare the empty platform, calibrate the scale, then place a known-empty plate. The user explicitly confirms the tare request. The backend records the stable pre-tare plate reading, asks the ESP32 to tare, and persists `live_plate` mode. Subsequent scale readings are already net food mass; the backend does not subtract the plate again. A live tare is never issued automatically. Food must not be on the plate at the time of this explicit operation. When changing back to an empty-platform tare, the service requires the live-tared plate's negative stable reading to confirm removal.
 
-If the scale is not yet tared, `platform_empty` can issue the initial explicit tare only when the HX711 is connected and the caller confirms the platform is empty. An empty plate live tare requires a stable calibrated reading.
+If the scale is not yet tared, `platform_empty` can issue the initial explicit tare only when the HX711 is connected and the caller confirms the platform is empty. An empty plate live tare requires a stable calibrated reading. After a live-tared scan, a near-zero reading means the empty plate may still be on the scale; the monitor re-arms only after stable negative weight is consistent with the recorded empty-plate tare mass. This prevents removing food while leaving the plate from triggering another scan.
 
 ## Camera and analysis coordination
 

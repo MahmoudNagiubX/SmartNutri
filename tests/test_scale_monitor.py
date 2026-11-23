@@ -99,13 +99,20 @@ class ScaleMonitorTests(unittest.TestCase):
         self.assertTrue(event.observation.simulated)
 
     def test_live_tare_removal_accepts_negative_stable_plate_weight(self):
-        monitor = self.monitor(post_stability_delay_s=0, tare_mode="live_plate")
+        monitor = self.monitor(
+            post_stability_delay_s=0,
+            tare_mode="live_plate",
+            live_plate_weight_g=300,
+        )
         monitor.observe(reading(300, stable=False), now=0)
         monitor.observe(reading(300), now=0.1)
         trigger = monitor.observe(reading(300), now=0.2)
         self.assertEqual(trigger.kind, "capture")
         monitor.set_state(ScanState.WAITING_FOR_REMOVAL)
         monitor.observe(reading(200), now=0.3)
+        for step in range(3):
+            self.assertIsNone(monitor.observe(reading(0), now=0.4 + step / 10))
+        self.assertEqual(monitor.state, ScanState.WAITING_FOR_REMOVAL)
         monitor.observe(reading(-300), now=0.4)
         monitor.observe(reading(-300), now=0.5)
         removed = monitor.observe(reading(-300), now=0.6)
