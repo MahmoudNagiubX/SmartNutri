@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -181,3 +182,45 @@ class FoodClassMapping(StrictModel):
         if self.class_id == 0 and self.label.casefold() != "background":
             raise ValueError("FoodSeg103 class 0 must remain background")
         return self
+
+
+class PlateProfileCreate(StrictModel):
+    name: str = Field(min_length=1, max_length=100)
+    empty_plate_weight_g: float = Field(gt=0, le=5000, allow_inf_nan=False)
+    make_default: bool = False
+
+
+class PlateProfile(StrictModel):
+    id: str
+    name: str
+    empty_plate_weight_g: float
+    reference_image_path: str | None = None
+    is_default: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class PlateDefaultRequest(StrictModel):
+    plate_profile_id: str = Field(min_length=1, max_length=64)
+
+
+class ScaleStatusResponse(StrictModel):
+    configured: bool
+    status: str
+    source: Literal["hx711", "mock"] | None = None
+    simulated: bool = False
+    sensor_connected: bool = False
+    stable: bool = False
+    tared: bool = False
+    calibrated: bool = False
+    unit: Literal["g"] = "g"
+    weight_g: float | None = Field(default=None, allow_inf_nan=False)
+    state: ScanState = ScanState.IDLE
+    last_error: str | None = None
+
+
+class TareConfigurationResponse(StrictModel):
+    mode: TareMode
+    live_tare_active: bool
+    empty_plate_weight_g: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    live_tare_at: datetime | None = None
