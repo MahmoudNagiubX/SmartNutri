@@ -1,0 +1,27 @@
+{
+  "name": "baseline",
+  "image_size": 512,
+  "mean": [0.485, 0.456, 0.406],
+  "std": [0.229, 0.224, 0.225],
+  "augmentation": {
+    "horizontal_flip_probability": 0.0,
+    "rotation_probability": 0.0,
+    "rotation_degrees": 0.0,
+    "photometric_probability": 0.0,
+    "brightness_delta": 0.0,
+    "contrast_delta": 0.0,
+    "saturation_delta": 0.0,
+    "gaussian_blur_probability": 0.0,
+    "gaussian_blur_radius": 0.0,
+    "gaussian_noise_probability": 0.0,
+    "gaussian_noise_std": 0.0
+  },
+  "enhancements": {
+    "clahe": false,
+    "clahe_clip_limit": 2.0,
+    "clahe_grid_size": 8,
+    "gamma": 1.0,
+    "denoising": false,
+    "denoising_kernel_size": 3
+  }
+}
