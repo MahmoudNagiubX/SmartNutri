@@ -13,6 +13,31 @@ from smartnutri_backend.camera import CapturedImage
 from smartnutri_backend.schemas import FoodPrediction
 
 
+FOODSEG103_LABEL_ANCHORS = {
+    0: "background",
+    3: "french fries",
+    24: "egg",
+    25: "apple",
+    29: "banana",
+    48: "chicken duck",
+    66: "rice",
+    70: "potato",
+    73: "tomato",
+    87: "broccoli",
+}
+
+
+def validate_foodseg103_label_anchors(labels: FoodSegLabelMap) -> None:
+    """Catch mock/arbitrary class IDs before a real checkpoint can use them."""
+    for class_id, expected in FOODSEG103_LABEL_ANCHORS.items():
+        actual = labels.label_for(class_id).strip().casefold()
+        if actual != expected:
+            raise ValueError(
+                f"local FoodSeg103 mapping mismatch at class {class_id}: "
+                f"expected {expected!r}, found {actual!r}"
+            )
+
+
 class FoodSegLabelMap:
     """Validated FoodSeg103 mapping. Runtime mappings come from local id2label.json."""
 
@@ -242,10 +267,13 @@ class SegFormerInferenceService:
             if not required.is_file():
                 raise FileNotFoundError(f"required local inference metadata is missing: {required.name}")
         labels = FoodSegLabelMap.from_json(label_path)
+        validate_foodseg103_label_anchors(labels)
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        if metadata.get("dataset") != "FoodSeg103" or metadata.get("num_labels") != 104:
+        if metadata.get("dataset") not in (None, "FoodSeg103"):
+            raise ValueError("checkpoint metadata identifies a different dataset")
+        if metadata.get("num_labels") not in (None, 104):
             raise ValueError("checkpoint metadata does not identify the 104-class FoodSeg103 task")
-        if metadata.get("padding_label") != 255:
+        if metadata.get("padding_label") not in (None, 255):
             raise ValueError("checkpoint metadata does not preserve ignore_index=255")
         preprocessing_values = metadata.get("preprocessing_config")
         if not isinstance(preprocessing_values, dict):

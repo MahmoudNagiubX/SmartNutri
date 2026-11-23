@@ -10,6 +10,7 @@ from smartnutri_backend.vision import (
     FoodSegLabelMap,
     MockSegmentationService,
     SegFormerInferenceService,
+    validate_foodseg103_label_anchors,
 )
 
 
@@ -45,6 +46,26 @@ class VisionAdapterTests(unittest.TestCase):
             FoodSegLabelMap({**labels, 0: "food"})
         with self.assertRaises(ValueError):
             FoodSegLabelMap({key: value for key, value in labels.items() if key != 103})
+
+    def test_real_foodseg_class_anchors_reject_mock_fixture_mapping(self):
+        with self.assertRaises(ValueError):
+            validate_foodseg103_label_anchors(FoodSegLabelMap.mock_fixture())
+
+        labels = dict(FoodSegLabelMap.mock_fixture().labels)
+        labels.update({
+            0: "background",
+            3: "french fries",
+            24: "egg",
+            25: "apple",
+            29: "banana",
+            48: "chicken duck",
+            66: "rice",
+            70: "potato",
+            73: "tomato",
+            87: "broccoli",
+        })
+        labels = FoodSegLabelMap(labels)
+        validate_foodseg103_label_anchors(labels)
 
     def test_real_inference_fails_closed_without_local_metadata_or_checkpoint(self):
         with tempfile.TemporaryDirectory() as temp_dir:
