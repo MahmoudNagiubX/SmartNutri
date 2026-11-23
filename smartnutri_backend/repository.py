@@ -194,6 +194,8 @@ class SQLiteRepository:
             not math.isfinite(empty_plate_weight_g) or empty_plate_weight_g <= 0
         ):
             raise ValueError("empty plate weight must be finite and positive")
+        if mode == "live_plate" and empty_plate_weight_g is None:
+            raise ValueError("live plate mode requires the measured empty plate weight")
         if mode == "saved_plate" and live_tare_active:
             raise ValueError("saved plate mode cannot have an active live tare")
         self.set_setting(
@@ -311,6 +313,32 @@ class SQLiteRepository:
                 "SELECT * FROM scans WHERE placement_key = ?", (placement_key,)
             ).fetchone()
         return self._dict(row) or {}
+
+    def begin_scan_for_placement(
+        self,
+        *,
+        placement_key: str,
+        source: str,
+        simulated: bool,
+        state: str = "WEIGHT_DETECTED",
+    ) -> dict[str, Any]:
+        """Atomically persist the dedupe record and restart latch."""
+        if source not in {"hx711", "mock"} or (source == "mock") != simulated:
+            raise ValueError("scan source and simulated marker disagree")
+        now, scan_id = utc_now(), str(uuid.uuid4())
+        with self._lock, self._connection:
+            self._connection.execute(
+                """INSERT INTO scans(id, placement_key, state, source, simulated, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(placement_key) DO NOTHING""",
+                (scan_id, placement_key, state, source, int(simulated), now, now),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM scans WHERE placement_key = ?", (placement_key,)
+            ).fetchone()
+            self._set_setting_unlocked(
+                "monitor_latch", {"latched": True, "placement_key": placement_key}
+            )
+        return self._decode_scan(row) or {}
 
     def get_scan(self, scan_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -446,4 +474,223 @@ class SQLiteRepository:
                 parameters,
             ).fetchall()
         return [self._decode_nutrition_record(row) or {} for row in rows]
+
+    def save_meal(
+        self,
+        *,
+        scan_id: str,
+        measured_net_food_weight_g: float,
+        items: list[dict[str, Any]],
+        totals: dict[str, Any] | None,
+        state: str,
+    ) -> dict[str, Any]:
+        if not math.isfinite(measured_net_food_weight_g) or measured_net_food_weight_g <= 0:
+            raise ValueError("meal weight must be finite and positive")
+        now = utc_now()
+        meal_id = str(uuid.uuid4())
+        total_values = totals or {}
+        with self._lock, self._connection:
+            scan = self._connection.execute(
+                "SELECT measured_net_food_weight_g, portions_json FROM scans WHERE id = ?", (scan_id,)
+            ).fetchone()
+            if scan is None:
+                raise KeyError(scan_id)
+            scan_weight = scan["measured_net_food_weight_g"]
+            if scan_weight is None or abs(float(scan_weight) - measured_net_food_weight_g) > 0.05:
+                raise ValueError("meal weight must match the scan's measured net food weight")
+            portion_result = self._decode_json(scan["portions_json"]) or {}
+            allocated_weight = sum(float(item.get("estimated_weight_g", 0)) for item in items)
+            if portion_result.get("allocation_complete"):
+                if abs(allocated_weight - measured_net_food_weight_g) > 0.05:
+                    raise ValueError("complete meal portions must conserve measured net food weight")
+            else:
+                unallocated = portion_result.get("unallocated_weight_g")
+                if unallocated is None or abs(allocated_weight + float(unallocated) - measured_net_food_weight_g) > 0.05:
+                    raise ValueError("incomplete meal portions must record conserved unallocated mass")
+            existing = self._connection.execute(
+                "SELECT id FROM meals WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+            if existing is not None:
+                meal_id = existing["id"]
+                self._connection.execute(
+                    """UPDATE meals SET state = ?, measured_net_food_weight_g = ?,
+                       nutrition_estimated = 1, kcal_total = ?, protein_g_total = ?,
+                       carbohydrates_g_total = ?, fat_g_total = ?, updated_at = ? WHERE id = ?""",
+                    (
+                        state,
+                        float(measured_net_food_weight_g),
+                        total_values.get("kcal"),
+                        total_values.get("protein_g"),
+                        total_values.get("carbohydrates_g"),
+                        total_values.get("fat_g"),
+                        now,
+                        meal_id,
+                    ),
+                )
+                self._connection.execute("DELETE FROM meal_items WHERE meal_id = ?", (meal_id,))
+            else:
+                self._connection.execute(
+                    """INSERT INTO meals
+                       (id, scan_id, state, measured_net_food_weight_g, nutrition_estimated,
+                        kcal_total, protein_g_total, carbohydrates_g_total, fat_g_total,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        meal_id,
+                        scan_id,
+                        state,
+                        float(measured_net_food_weight_g),
+                        total_values.get("kcal"),
+                        total_values.get("protein_g"),
+                        total_values.get("carbohydrates_g"),
+                        total_values.get("fat_g"),
+                        now,
+                        now,
+                    ),
+                )
+            for item in items:
+                self._connection.execute(
+                    """INSERT INTO meal_items
+                       (id, meal_id, class_id, food_label, classification_confidence,
+                        pixel_area, region_count, estimated_weight_g, portion_method,
+                        portion_confidence, portion_uncertainty_g, nutrition_record_id,
+                        nutrient_estimate_json, user_corrected, needs_review, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        str(uuid.uuid4()),
+                        meal_id,
+                        item.get("class_id"),
+                        item["food_label"],
+                        item.get("classification_confidence"),
+                        item.get("pixel_area"),
+                        item.get("region_count"),
+                        item.get("estimated_weight_g"),
+                        item.get("portion_method"),
+                        item.get("portion_confidence"),
+                        item.get("portion_uncertainty_g"),
+                        item.get("nutrition_record_id"),
+                        json.dumps(item["nutrients"], separators=(",", ":"))
+                        if item.get("nutrients") is not None else None,
+                        int(bool(item.get("user_corrected", False))),
+                        int(bool(item.get("needs_review", True))),
+                        now,
+                    ),
+                )
+        result = self.get_meal(meal_id)
+        assert result is not None
+        return result
+
+    @classmethod
+    def _decode_meal(cls, row: sqlite3.Row | None, item_rows: list[sqlite3.Row]) -> dict[str, Any] | None:
+        result = cls._dict(row)
+        if result is None:
+            return None
+        result["nutrition_estimated"] = bool(result["nutrition_estimated"])
+        scan_simulated = bool(result.pop("scan_simulated"))
+        capture_simulated = bool(result.pop("scan_capture_simulated"))
+        prediction_data = cls._decode_json(result.pop("scan_predictions_json")) or []
+        portion_data = cls._decode_json(result.pop("scan_portions_json")) or {}
+        result["simulated"] = (
+            scan_simulated
+            or capture_simulated
+            or any(bool(item.get("simulated")) for item in prediction_data)
+            or bool(portion_data.get("simulated", False))
+        )
+        result["items"] = []
+        for item_row in item_rows:
+            item = dict(item_row)
+            item["user_corrected"] = bool(item["user_corrected"])
+            item["needs_review"] = bool(item["needs_review"])
+            item["nutrients"] = cls._decode_json(item.pop("nutrient_estimate_json"))
+            result["items"].append(item)
+        return result
+
+    def get_meal(self, meal_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT meals.*, scans.simulated AS scan_simulated,
+                          scans.capture_simulated AS scan_capture_simulated,
+                          scans.predictions_json AS scan_predictions_json,
+                          scans.portions_json AS scan_portions_json
+                   FROM meals JOIN scans ON scans.id = meals.scan_id WHERE meals.id = ?""",
+                (meal_id,),
+            ).fetchone()
+            items = self._connection.execute(
+                "SELECT * FROM meal_items WHERE meal_id = ? ORDER BY created_at, id", (meal_id,)
+            ).fetchall()
+        return self._decode_meal(row, items)
+
+    def get_meal_by_scan(self, scan_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT id FROM meals WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+        return self.get_meal(row["id"]) if row else None
+
+    def list_meals(self, limit: int = 50) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 200))
+        with self._lock:
+            ids = self._connection.execute(
+                "SELECT id FROM meals ORDER BY updated_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [meal for row in ids if (meal := self.get_meal(row["id"])) is not None]
+
+    def replace_corrected_meal(
+        self,
+        *,
+        meal_id: str,
+        items: list[dict[str, Any]],
+        totals: dict[str, Any] | None,
+        state: str,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        total_values = totals or {}
+        with self._lock, self._connection:
+            existing = self._connection.execute(
+                "SELECT measured_net_food_weight_g FROM meals WHERE id = ?", (meal_id,)
+            ).fetchone()
+            if existing is None:
+                raise KeyError(meal_id)
+            corrected_total = sum(float(item["estimated_weight_g"]) for item in items)
+            if abs(corrected_total - float(existing["measured_net_food_weight_g"])) > 0.05:
+                raise ValueError("corrected portion weights must conserve measured net food weight")
+            self._connection.execute(
+                """UPDATE meals SET state = ?, kcal_total = ?, protein_g_total = ?,
+                   carbohydrates_g_total = ?, fat_g_total = ?, correction_revision = correction_revision + 1,
+                   updated_at = ? WHERE id = ?""",
+                (
+                    state,
+                    total_values.get("kcal"),
+                    total_values.get("protein_g"),
+                    total_values.get("carbohydrates_g"),
+                    total_values.get("fat_g"),
+                    now,
+                    meal_id,
+                ),
+            )
+            self._connection.execute("DELETE FROM meal_items WHERE meal_id = ?", (meal_id,))
+            for item in items:
+                self._connection.execute(
+                    """INSERT INTO meal_items
+                       (id, meal_id, class_id, food_label, estimated_weight_g,
+                        portion_method, portion_confidence, portion_uncertainty_g,
+                        nutrition_record_id, nutrient_estimate_json, user_corrected,
+                        needs_review, created_at)
+                       VALUES (?, ?, ?, ?, ?, 'user_correction', 1.0, 0.0, ?, ?, 1, ?, ?)""",
+                    (
+                        str(uuid.uuid4()),
+                        meal_id,
+                        item["class_id"],
+                        item["food_label"],
+                        item["estimated_weight_g"],
+                        item.get("nutrition_record_id"),
+                        json.dumps(item["nutrients"], separators=(",", ":"))
+                        if item.get("nutrients") is not None else None,
+                        int(item.get("needs_review", False)),
+                        now,
+                    ),
+                )
+        result = self.get_meal(meal_id)
+        assert result is not None
+        return result
 

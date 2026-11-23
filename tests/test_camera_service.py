@@ -1,16 +1,19 @@
 import io
 import tempfile
 import unittest
+import urllib.request
 from pathlib import Path
 
 from PIL import Image, ImageDraw
 
 from smartnutri_backend.camera import (
     CameraService,
+    CameraUnavailable,
     FileCameraService,
     ImageQualityError,
     IPSnapshotCameraService,
     MockCameraService,
+    _PrivateNetworkRedirectHandler,
 )
 
 
@@ -109,7 +112,7 @@ class CameraServiceTests(unittest.TestCase):
             path.write_bytes(clear_image())
             capture = FileCameraService(path).capture_best()
             self.assertEqual(capture.source, "file")
-            self.assertFalse(capture.simulated)
+            self.assertTrue(capture.simulated)
             self.assertTrue(capture.quality.acceptable)
 
     def test_ip_snapshot_adapter_allows_lan_and_rejects_public_or_credential_urls(self):
@@ -121,6 +124,14 @@ class CameraServiceTests(unittest.TestCase):
         ):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 IPSnapshotCameraService(url)
+
+    def test_ip_snapshot_blocks_public_redirect_before_following_it(self):
+        camera = IPSnapshotCameraService("http://192.168.1.20:8080/photo.jpg")
+        request = urllib.request.Request(camera.snapshot_url)
+        with self.assertRaises(CameraUnavailable):
+            _PrivateNetworkRedirectHandler().redirect_request(
+                request, None, 302, "Found", {}, "http://8.8.8.8/redirected.jpg"
+            )
 
 
 if __name__ == "__main__":

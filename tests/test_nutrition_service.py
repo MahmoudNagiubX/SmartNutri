@@ -78,6 +78,23 @@ class NutritionServiceTests(unittest.TestCase):
         self.assertFalse(result.complete)
         self.assertIsNone(result.items[0].nutrients)
 
+    def test_explicit_verified_record_selection_resolves_preparation_ambiguity(self):
+        first = self.service.register(self.record())
+        self.service.register(
+            self.record(
+                preparation_state="fried",
+                source="second-source",
+                version="v2",
+                kcal_per_100g=180,
+            )
+        )
+        result = self.service.calculate(
+            [self.estimate()],
+            nutrition_record_ids={1: first["id"]},
+        )
+        self.assertTrue(result.complete)
+        self.assertEqual(result.items[0].nutrition_record_id, first["id"])
+
     def test_meal_totals_are_only_returned_when_every_food_is_mapped(self):
         self.service.register(self.record())
         self.service.register(

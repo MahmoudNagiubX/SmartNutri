@@ -58,7 +58,17 @@ class NutritionService:
         data = self.repository.get_nutrition_record(record_id)
         return self._record_from_row(data) if data else None
 
-    def lookup_for_class(self, class_id: int) -> tuple[str, NutritionRecord] | None:
+    def lookup_for_class(
+        self,
+        class_id: int,
+        *,
+        nutrition_record_id: str | None = None,
+    ) -> tuple[str, NutritionRecord] | None:
+        if nutrition_record_id is not None:
+            data = self.repository.get_nutrition_record(nutrition_record_id)
+            if data is None or not data.get("verified") or data.get("class_id") != class_id:
+                return None
+            return nutrition_record_id, self._record_from_row(data)
         records = self.repository.list_nutrition_records(class_id=class_id, verified_only=True)
         if len(records) != 1:
             return None
@@ -84,11 +94,15 @@ class NutritionService:
         portions: list[PortionEstimate],
         *,
         simulated: bool | None = None,
+        nutrition_record_ids: dict[int, str] | None = None,
     ) -> NutritionCalculation:
         results: list[FoodNutritionResult] = []
         simulated_output = bool(simulated) or any(item.simulated for item in portions)
         for portion in portions:
-            mapping = self.lookup_for_class(portion.class_id)
+            mapping = self.lookup_for_class(
+                portion.class_id,
+                nutrition_record_id=(nutrition_record_ids or {}).get(portion.class_id),
+            )
             if mapping is None:
                 results.append(
                     FoodNutritionResult(

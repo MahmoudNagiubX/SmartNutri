@@ -58,14 +58,14 @@ class ScaleObservation(StrictModel):
         if (self.source == "mock") != self.simulated:
             raise ValueError("mock readings must be simulated and HX711 readings must be real")
         if self.status == "stable":
-            if not (
-                self.ok
+            real_ready = (
+                self.source == "hx711"
                 and self.sensor_connected
                 and self.tared
                 and self.calibrated
-                and self.stable
-                and self.weight_g is not None
-            ):
+            )
+            simulated_ready = self.source == "mock" and self.simulated
+            if not (self.ok and (real_ready or simulated_ready) and self.stable and self.weight_g is not None):
                 raise ValueError("stable status requires a finite, ready scale reading")
         if self.status in {"sensor_disconnected", "sensor_error", "overload"}:
             if self.weight_g is not None:
@@ -188,6 +188,7 @@ class PlateProfileCreate(StrictModel):
     name: str = Field(min_length=1, max_length=100)
     empty_plate_weight_g: float = Field(gt=0, le=5000, allow_inf_nan=False)
     make_default: bool = False
+    reference_image_path: str | None = Field(default=None, max_length=500)
 
 
 class PlateProfile(StrictModel):
@@ -224,3 +225,98 @@ class TareConfigurationResponse(StrictModel):
     live_tare_active: bool
     empty_plate_weight_g: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     live_tare_at: datetime | None = None
+
+
+class TareRequest(StrictModel):
+    mode: Literal["platform_empty", "empty_plate"]
+    confirm: Literal["TARE"]
+
+
+class ScaleCalibrationRequest(StrictModel):
+    known_weight_g: float = Field(gt=0, le=5000, allow_inf_nan=False)
+    confirm: Literal["CALIBRATE"]
+
+
+class MockPlacementRequest(StrictModel):
+    gross_weight_g: float = Field(gt=0, le=5000, allow_inf_nan=False)
+
+
+class MealItemCorrection(StrictModel):
+    class_id: int = Field(ge=1, le=103)
+    label: str = Field(min_length=1, max_length=120)
+    weight_g: float = Field(gt=0, allow_inf_nan=False)
+    nutrition_record_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class MealCorrectionRequest(StrictModel):
+    items: list[MealItemCorrection] = Field(min_length=1, max_length=104)
+
+
+class MealItemResponse(StrictModel):
+    id: str
+    meal_id: str
+    class_id: int | None = Field(default=None, ge=1, le=103)
+    food_label: str
+    classification_confidence: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    pixel_area: int | None = Field(default=None, ge=0)
+    region_count: int | None = Field(default=None, ge=0)
+    estimated_weight_g: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    portion_method: str | None = None
+    portion_confidence: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    portion_uncertainty_g: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    nutrition_record_id: str | None = None
+    nutrients: NutrientEstimate | None = None
+    user_corrected: bool
+    needs_review: bool
+    created_at: datetime
+
+
+class MealResponse(StrictModel):
+    id: str
+    scan_id: str
+    state: str
+    measured_net_food_weight_g: float = Field(gt=0, allow_inf_nan=False)
+    nutrition_estimated: bool
+    kcal_total: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    protein_g_total: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    carbohydrates_g_total: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    fat_g_total: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    correction_revision: int = Field(ge=0)
+    created_at: datetime
+    updated_at: datetime
+    simulated: bool
+    items: list[MealItemResponse] = Field(default_factory=list)
+
+
+class ScanResponse(StrictModel):
+    id: str
+    placement_key: str
+    state: ScanState
+    decision: AgentAction | None = None
+    source: Literal["hx711", "mock"]
+    simulated: bool
+    tare_mode: TareMode | None = None
+    plate_profile_id: str | None = None
+    measured_gross_weight_g: float | None = Field(default=None, allow_inf_nan=False)
+    plate_tare_weight_g: float | None = Field(default=None, allow_inf_nan=False)
+    measured_net_food_weight_g: float | None = Field(default=None, allow_inf_nan=False)
+    capture_source: str | None = None
+    capture_simulated: bool | None = None
+    image_quality: ImageQuality | None = None
+    predictions: list[FoodPrediction] | None = None
+    portions: PortionEstimationResult | None = None
+    nutrition_totals: NutrientEstimate | None = None
+    result_message: str | None = None
+    error_code: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    capture_url: str | None = None
+    annotated_url: str | None = None
+    mask_url: str | None = None
+    meal: MealResponse | None = None
+
+
+class MockPlacementResponse(StrictModel):
+    scan: ScanResponse
+    simulated: Literal[True]
+    simulation_notice: str

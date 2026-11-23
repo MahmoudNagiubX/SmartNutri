@@ -31,10 +31,18 @@ class AgentContext(StrictModel):
 class NutritionDecisionAgent:
     """Transparent backend policy; this is not a separately trained AI model."""
 
-    def __init__(self, *, min_classification_confidence: float = 0.55) -> None:
+    def __init__(
+        self,
+        *,
+        min_classification_confidence: float = 0.55,
+        max_portion_uncertainty_fraction: float = 0.20,
+    ) -> None:
         if not math.isfinite(min_classification_confidence) or not 0 <= min_classification_confidence <= 1:
             raise ValueError("classification confidence threshold must be in [0, 1]")
+        if not math.isfinite(max_portion_uncertainty_fraction) or not 0 <= max_portion_uncertainty_fraction <= 1:
+            raise ValueError("portion uncertainty threshold must be in [0, 1]")
         self.min_classification_confidence = min_classification_confidence
+        self.max_portion_uncertainty_fraction = max_portion_uncertainty_fraction
 
     def decide(self, context: AgentContext) -> AgentDecision:
         reading = context.scale
@@ -100,12 +108,21 @@ class NutritionDecisionAgent:
             )
 
         portions = context.portions
+        portion_uncertainty_too_high = bool(
+            portions
+            and context.net_weight_g
+            and any(
+                item.uncertainty_g / context.net_weight_g > self.max_portion_uncertainty_fraction
+                for item in portions.estimates
+            )
+        )
         if (
             portions is None
             or not portions.allocation_complete
             or portions.unallocated_weight_g not in (None, 0)
             or portions.review_required
             or any(item.review_required for item in portions.estimates)
+            or portion_uncertainty_too_high
             or abs(sum(item.estimated_weight_g for item in portions.estimates) - context.net_weight_g) > 0.05
         ):
             return AgentDecision(

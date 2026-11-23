@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 def _default_data_dir() -> Path:
@@ -74,7 +76,8 @@ class Settings:
             "camera_timeout_s", "post_stability_delay_s", "min_brightness",
         )
         for name in positive:
-            if getattr(self, name) <= 0:
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be positive")
         if self.removal_threshold_g >= self.placement_threshold_g:
             raise ValueError("removal threshold must be lower than placement threshold")
@@ -84,8 +87,26 @@ class Settings:
             raise ValueError("capture retries/count are invalid")
         if not 0 < self.max_image_bytes <= 32 * 1024 * 1024:
             raise ValueError("max_image_bytes must be in (0, 32 MiB]")
+        if (
+            self.min_image_width < 5
+            or self.min_image_height < 5
+            or self.max_image_dimension < max(self.min_image_width, self.min_image_height)
+        ):
+            raise ValueError("image dimensions are inconsistent")
+        if not 0 <= self.min_brightness < self.max_brightness <= 255:
+            raise ValueError("brightness limits must satisfy 0 <= min < max <= 255")
+        if not math.isfinite(self.min_edge_variance) or self.min_edge_variance < 0:
+            raise ValueError("min_edge_variance must be finite and non-negative")
+        if not 0 <= self.max_clipped_pixel_fraction <= 1:
+            raise ValueError("max_clipped_pixel_fraction must be in [0, 1]")
         if not 0 <= self.min_classification_confidence <= 1:
             raise ValueError("min_classification_confidence must be in [0, 1]")
+        if not 0 <= self.portion_review_uncertainty_fraction <= 1:
+            raise ValueError("portion_review_uncertainty_fraction must be in [0, 1]")
+        for origin in self.cors_origins:
+            parsed = urlsplit(origin)
+            if "*" in origin or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError("CORS origins must be explicit HTTP(S) origins without wildcards")
 
     @property
     def database_path(self) -> Path:
@@ -120,7 +141,7 @@ class Settings:
             foodseg_root=optional_path("SMARTNUTRI_FOODSEG_ROOT"),
             control_token=os.environ.get("SMARTNUTRI_CONTROL_TOKEN") or None,
             cors_origins=origins,
-            auto_scan_enabled=_env_bool("SMARTNUTRI_AUTO_SCAN", default=bool(scale_url)),
+            auto_scan_enabled=_env_bool("SMARTNUTRI_AUTO_SCAN", default=False),
             scale_poll_interval_s=float(os.environ.get("SMARTNUTRI_SCALE_POLL_INTERVAL", "0.25")),
             placement_threshold_g=float(os.environ.get("SMARTNUTRI_PLACEMENT_THRESHOLD_G", "20")),
             removal_threshold_g=float(os.environ.get("SMARTNUTRI_REMOVAL_THRESHOLD_G", "10")),
@@ -130,4 +151,10 @@ class Settings:
             camera_timeout_s=float(os.environ.get("SMARTNUTRI_CAMERA_TIMEOUT", "4.0")),
             capture_retries=int(os.environ.get("SMARTNUTRI_CAPTURE_RETRIES", "2")),
             capture_burst_count=int(os.environ.get("SMARTNUTRI_CAPTURE_BURST_COUNT", "1")),
+            min_classification_confidence=float(
+                os.environ.get("SMARTNUTRI_MIN_CLASSIFICATION_CONFIDENCE", "0.55")
+            ),
+            portion_review_uncertainty_fraction=float(
+                os.environ.get("SMARTNUTRI_PORTION_REVIEW_UNCERTAINTY_FRACTION", "0.20")
+            ),
         )

@@ -138,6 +138,7 @@ class ScaleMonitor:
             }:
                 self.last_error = observation.status
             return None
+        self.last_error = None
         if observation.source == "mock" and not self.allow_simulated:
             self._removal_count = 0
             return None

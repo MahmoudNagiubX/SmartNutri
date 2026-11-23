@@ -210,9 +210,24 @@ class MockCameraService(CameraService):
         return output.getvalue()
 
 
+class UnconfiguredCameraService(CameraService):
+    source = "unconfigured"
+    simulated = False
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+
+    def status(self) -> dict[str, Any]:
+        return {"configured": False, "source": self.source, "simulated": False}
+
+    def capture_raw(self) -> bytes:
+        raise CameraUnavailable("camera mode is selected but no source is configured")
+
+
 class FileCameraService(CameraService):
     source = "file"
-    simulated = False
+    # File/image input is a development/test fixture, never a live phone capture.
+    simulated = True
 
     def __init__(self, image_path: str | Path, **kwargs: Any) -> None:
         self.image_path = Path(image_path).expanduser().resolve()
@@ -227,9 +242,23 @@ class FileCameraService(CameraService):
     def capture_raw(self) -> bytes:
         if not self.image_path.is_file():
             raise CameraUnavailable("configured camera image file is unavailable")
-        if self.image_path.stat().st_size > self.max_image_bytes:
+        try:
+            with self.image_path.open("rb") as stream:
+                raw = stream.read(self.max_image_bytes + 1)
+        except OSError as exc:
+            raise CameraUnavailable("configured camera image file could not be read") from exc
+        if len(raw) > self.max_image_bytes:
             raise ImageQualityError("configured image file exceeds the byte limit")
-        return self.image_path.read_bytes()
+        return raw
+
+
+class _PrivateNetworkRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, new_url):
+        try:
+            IPSnapshotCameraService._validate_url(new_url)
+        except ValueError as exc:
+            raise CameraUnavailable("phone camera redirect target is outside the private network") from exc
+        return super().redirect_request(request, fp, code, message, headers, new_url)
 
 
 class IPSnapshotCameraService(CameraService):
@@ -267,10 +296,23 @@ class IPSnapshotCameraService(CameraService):
             method="GET",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}),
+                _PrivateNetworkRedirectHandler(),
+            )
+            with opener.open(request, timeout=self.timeout_s) as response:
+                try:
+                    self._validate_url(response.geturl())
+                except ValueError as exc:
+                    raise CameraUnavailable("phone camera redirected outside the configured private network") from exc
                 declared_size = response.headers.get("Content-Length")
-                if declared_size and int(declared_size) > self.max_image_bytes:
-                    raise ImageQualityError("camera response exceeds the byte limit")
+                if declared_size:
+                    try:
+                        declared_bytes = int(declared_size)
+                    except ValueError as exc:
+                        raise ImageQualityError("camera returned an invalid content length") from exc
+                    if declared_bytes < 0 or declared_bytes > self.max_image_bytes:
+                        raise ImageQualityError("camera response exceeds the byte limit")
                 raw = response.read(self.max_image_bytes + 1)
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise CameraUnavailable("phone camera snapshot request failed") from exc

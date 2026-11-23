@@ -119,6 +119,21 @@ class NutritionDecisionAgentTests(unittest.TestCase):
         context = self.base.model_copy(update={"portions": good_portions(review=True)})
         self.assertEqual(self.agent.decide(context).action, AgentAction.REVIEW_PORTION_ESTIMATES)
 
+    def test_portion_uncertainty_fraction_is_configurable_policy_input(self):
+        item = PortionEstimate.model_validate(
+            {**good_portions().estimates[0].model_dump(), "uncertainty_g": 100}
+        )
+        portions = PortionEstimationResult(
+            measured_net_weight_g=450,
+            method="test",
+            estimates=[item],
+            allocation_complete=True,
+            review_required=False,
+            simulated=True,
+        )
+        context = self.base.model_copy(update={"portions": portions})
+        self.assertEqual(self.agent.decide(context).action, AgentAction.REVIEW_PORTION_ESTIMATES)
+
     def test_good_analysis_is_accepted_then_saved_automatically(self):
         accepted = self.agent.decide(self.base)
         self.assertEqual(accepted.action, AgentAction.ACCEPT_ANALYSIS)
