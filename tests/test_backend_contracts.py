@@ -96,11 +96,15 @@ class BackendContractTests(unittest.TestCase):
             carbohydrates_g_per_100g=28.2,
             fat_g_per_100g=0.3,
             source="synthetic-test-fixture",
+            source_identifier="test-fixture:rice-cooked",
             version="test-v1",
         )
         self.assertEqual(record.source, "synthetic-test-fixture")
+        self.assertEqual(record.source_identifier, "test-fixture:rice-cooked")
         with self.assertRaises(ValidationError):
             NutritionRecord.model_validate({**record.model_dump(), "source": ""})
+        with self.assertRaises(ValidationError):
+            NutritionRecord.model_validate({**record.model_dump(), "source_identifier": None, "verified": True})
 
 
 if __name__ == "__main__":

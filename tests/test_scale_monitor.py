@@ -119,6 +119,20 @@ class ScaleMonitorTests(unittest.TestCase):
         self.assertEqual(removed.kind, "removed")
         self.assertEqual(monitor.state, ScanState.IDLE)
 
+    def test_pending_live_tare_suppresses_empty_plate_scan_until_tare_is_confirmed(self):
+        monitor = self.monitor(live_tare_pending=True, post_stability_delay_s=0)
+        for index in range(5):
+            self.assertIsNone(monitor.observe(reading(300), now=index / 10))
+        self.assertIsNone(monitor.active_placement_key)
+        self.assertEqual(monitor.state, ScanState.IDLE)
+
+        monitor.set_live_tare(300)
+        monitor.observe(reading(450, stable=False), now=0.6)
+        monitor.observe(reading(450), now=0.7)
+        event = monitor.observe(reading(450), now=0.8)
+        self.assertEqual(event.kind, "capture")
+        self.assertEqual(event.observation.weight_g, 450)
+
     def test_restart_latch_starts_waiting_for_removal(self):
         monitor = ScaleMonitor(
             placement_threshold_g=20,

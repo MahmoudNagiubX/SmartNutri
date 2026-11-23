@@ -22,6 +22,7 @@ from smartnutri_backend.camera import (
     UnconfiguredCameraService,
 )
 from smartnutri_backend.nutrition import NutritionService
+from smartnutri_backend.nutrition_catalog import CURATED_NUTRITION_RECORDS
 from smartnutri_backend.portion import ExperimentalVisualProportionEstimator
 from smartnutri_backend.repository import SQLiteRepository
 from smartnutri_backend.scale_service import MockScaleClient, ScaleMonitoringService
@@ -143,6 +144,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 device="cpu",
             )
         nutrition = NutritionService(repository)
+        nutrition.seed_catalog(CURATED_NUTRITION_RECORDS)
         workflow = ScanWorkflow(
             repository=repository,
             camera=camera,

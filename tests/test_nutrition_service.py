@@ -31,6 +31,10 @@ class NutritionServiceTests(unittest.TestCase):
             "verified": True,
         }
         values.update(overrides)
+        if "source_identifier" not in overrides:
+            values["source_identifier"] = (
+                f"test-fixture:{values['class_id']}:{values['food_identity']}:{values['preparation_state']}"
+            )
         return NutritionRecord(**values)
 
     def estimate(self, weight=150, class_id=1, label="rice"):
@@ -54,6 +58,7 @@ class NutritionServiceTests(unittest.TestCase):
         self.assertEqual(item.nutrients.carbohydrates_g, 42.3)
         self.assertEqual(item.nutrients.fat_g, 0.45)
         self.assertEqual(item.nutrients.source, "synthetic-test-fixture")
+        self.assertEqual(item.nutrients.source_identifier, "test-fixture:1:rice:cooked")
         self.assertTrue(item.nutrients.estimated)
         self.assertTrue(result.simulated)
 

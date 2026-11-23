@@ -83,6 +83,7 @@ class ScaleMonitoringService:
                 tare.get("empty_plate_weight_g")
                 if tare.get("mode") == "live_plate" else None
             ),
+            live_tare_pending=tare.get("live_tare_pending", False),
             allow_simulated=allow_simulated,
             restored_latch=restored_latch,
         )
@@ -244,6 +245,19 @@ class ScaleMonitoringService:
             raise RuntimeError("remove the current plate before changing tare mode")
         current = self.to_observation(self.client.get_weight())
         tare_config = self.repository.get_tare_configuration()
+        if mode == "prepare_empty_plate":
+            if not current.usable_stable or current.weight_g is None:
+                raise RuntimeError("prepare live tare on a stable, empty platform before placing the plate")
+            if abs(current.weight_g) > self.settings.removal_threshold_g:
+                raise RuntimeError("remove all weight, then prepare live tare before placing the empty plate")
+            self.repository.set_tare_configuration(
+                mode="saved_plate",
+                live_tare_active=False,
+                live_tare_pending=True,
+                empty_plate_weight_g=None,
+            )
+            self.monitor.prepare_live_tare()
+            return self.repository.get_tare_configuration()
         if mode == "empty_plate":
             if not current.usable_stable or current.weight_g is None:
                 raise RuntimeError("live plate tare requires a stable calibrated scale reading")
@@ -276,9 +290,13 @@ class ScaleMonitoringService:
         self.repository.set_tare_configuration(
             mode=tare_mode,
             live_tare_active=tare_mode == "live_plate",
+            live_tare_pending=False,
             empty_plate_weight_g=empty_plate_weight_g,
             live_tare_at=(datetime.now(timezone.utc).isoformat() if tare_mode == "live_plate" else None),
         )
-        self.monitor.tare_mode = tare_mode
-        self.monitor.live_plate_weight_g = empty_plate_weight_g if tare_mode == "live_plate" else None
+        if tare_mode == "live_plate":
+            assert empty_plate_weight_g is not None
+            self.monitor.set_live_tare(empty_plate_weight_g)
+        else:
+            self.monitor.set_platform_tare()
         return self.repository.get_tare_configuration()

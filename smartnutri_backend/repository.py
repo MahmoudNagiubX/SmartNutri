@@ -62,8 +62,11 @@ class SQLiteRepository:
                     carbohydrates_g_per_100g REAL NOT NULL CHECK (carbohydrates_g_per_100g >= 0),
                     fat_g_per_100g REAL NOT NULL CHECK (fat_g_per_100g >= 0),
                     source TEXT NOT NULL,
+                    source_identifier TEXT NOT NULL DEFAULT '',
                     version TEXT NOT NULL,
                     verified INTEGER NOT NULL DEFAULT 0 CHECK (verified IN (0, 1)),
+                    requires_preparation_confirmation INTEGER NOT NULL DEFAULT 0
+                        CHECK (requires_preparation_confirmation IN (0, 1)),
                     created_at TEXT NOT NULL,
                     UNIQUE(food_identity, preparation_state, source, version)
                 );
@@ -130,9 +133,32 @@ class SQLiteRepository:
                 CREATE INDEX IF NOT EXISTS ix_meal_items_meal_id ON meal_items(meal_id);
                 """
             )
+            nutrition_columns = {
+                row["name"] for row in self._connection.execute("PRAGMA table_info(nutrition_records)")
+            }
+            if "source_identifier" not in nutrition_columns:
+                self._connection.execute(
+                    "ALTER TABLE nutrition_records ADD COLUMN source_identifier TEXT NOT NULL DEFAULT ''"
+                )
+            if "requires_preparation_confirmation" not in nutrition_columns:
+                self._connection.execute(
+                    """ALTER TABLE nutrition_records ADD COLUMN
+                       requires_preparation_confirmation INTEGER NOT NULL DEFAULT 0
+                       CHECK (requires_preparation_confirmation IN (0, 1))"""
+                )
+            # Legacy verified rows had no source identifier. Keep their records and history,
+            # but require an auditable source before the nutrition service can use them.
+            self._connection.execute(
+                "UPDATE nutrition_records SET verified = 0 WHERE source_identifier = '' AND verified = 1"
+            )
+            self._connection.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_nutrition_source_identifier
+                   ON nutrition_records(source, source_identifier) WHERE source_identifier <> ''"""
+            )
             self._set_default_setting_unlocked("tare_configuration", {
                 "mode": "saved_plate",
                 "live_tare_active": False,
+                "live_tare_pending": False,
                 "empty_plate_weight_g": None,
                 "live_tare_at": None,
             })
@@ -184,12 +210,15 @@ class SQLiteRepository:
         mode: str,
         live_tare_active: bool,
         empty_plate_weight_g: float | None,
+        live_tare_pending: bool = False,
         live_tare_at: str | None = None,
     ) -> None:
         if mode not in {"saved_plate", "live_plate"}:
             raise ValueError("mode must be saved_plate or live_plate")
         if live_tare_active != (mode == "live_plate"):
             raise ValueError("live_tare_active must agree with tare mode")
+        if live_tare_pending and (mode != "saved_plate" or live_tare_active):
+            raise ValueError("live tare can only be pending while saved plate mode is inactive")
         if empty_plate_weight_g is not None and (
             not math.isfinite(empty_plate_weight_g) or empty_plate_weight_g <= 0
         ):
@@ -203,6 +232,7 @@ class SQLiteRepository:
             {
                 "mode": mode,
                 "live_tare_active": live_tare_active,
+                "live_tare_pending": live_tare_pending,
                 "empty_plate_weight_g": empty_plate_weight_g,
                 "live_tare_at": live_tare_at,
             },
@@ -212,6 +242,7 @@ class SQLiteRepository:
         return self.get_setting("tare_configuration", {
             "mode": "saved_plate",
             "live_tare_active": False,
+            "live_tare_pending": False,
             "empty_plate_weight_g": None,
             "live_tare_at": None,
         })
@@ -416,8 +447,10 @@ class SQLiteRepository:
             float(record["carbohydrates_g_per_100g"]),
             float(record["fat_g_per_100g"]),
             record["source"],
+            record.get("source_identifier") or "",
             record["version"],
             int(bool(record.get("verified", False))),
+            int(bool(record.get("requires_preparation_confirmation", False))),
             now,
         )
         with self._lock, self._connection:
@@ -426,8 +459,9 @@ class SQLiteRepository:
                     """INSERT INTO nutrition_records
                        (id, class_id, food_identity, preparation_state, kcal_per_100g,
                         protein_g_per_100g, carbohydrates_g_per_100g, fat_g_per_100g,
-                        source, version, verified, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        source, source_identifier, version, verified,
+                        requires_preparation_confirmation, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     values,
                 )
             except sqlite3.IntegrityError as exc:
@@ -442,7 +476,20 @@ class SQLiteRepository:
         result = cls._dict(row)
         if result is not None:
             result["verified"] = bool(result["verified"])
+            result["requires_preparation_confirmation"] = bool(
+                result.get("requires_preparation_confirmation", False)
+            )
         return result
+
+    def get_nutrition_record_by_source_identifier(
+        self, source: str, source_identifier: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM nutrition_records WHERE source = ? AND source_identifier = ?",
+                (source, source_identifier),
+            ).fetchone()
+        return self._decode_nutrition_record(row)
 
     def get_nutrition_record(self, record_id: str) -> dict[str, Any] | None:
         with self._lock:

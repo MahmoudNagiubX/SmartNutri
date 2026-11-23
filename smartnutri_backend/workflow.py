@@ -103,7 +103,8 @@ class ScanWorkflow:
             if gross_weight_g <= plate_tare_weight_g:
                 return self._needs_plate_tare(
                     scan_id,
-                    "Measured gross weight does not exceed the selected empty plate weight.",
+                    "Measured gross weight does not exceed the selected empty plate weight. "
+                    "Remove the plate, add food, and place the loaded plate again, or prepare a live tare first.",
                 )
             net_weight_g = gross_weight_g - plate_tare_weight_g
 
@@ -202,10 +203,11 @@ class ScanWorkflow:
             portions.estimates,
             simulated=observation.simulated or capture.simulated or segmentation.simulated,
         )
+        nutrition_simulated = observation.simulated or capture.simulated or segmentation.simulated
         verified_classes = {
             prediction.class_id
             for prediction in segmentation.predictions
-            if self.nutrition.lookup_for_class(prediction.class_id) is not None
+            if self.nutrition.lookup_for_class(prediction.class_id, simulated=nutrition_simulated) is not None
         }
         context = AgentContext(
             scale=observation,

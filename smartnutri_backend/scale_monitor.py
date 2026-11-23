@@ -29,6 +29,7 @@ class ScaleMonitor:
         post_stability_delay_s: float,
         tare_mode: str = "saved_plate",
         live_plate_weight_g: float | None = None,
+        live_tare_pending: bool = False,
         allow_simulated: bool = False,
         restored_latch: dict | None = None,
     ) -> None:
@@ -55,6 +56,7 @@ class ScaleMonitor:
         self.post_stability_delay_s = float(post_stability_delay_s)
         self.tare_mode = tare_mode
         self.live_plate_weight_g = float(live_plate_weight_g) if live_plate_weight_g is not None else None
+        self.live_tare_pending = bool(live_tare_pending)
         self.allow_simulated = allow_simulated
         latch = restored_latch or {}
         self.active_placement_key = latch.get("placement_key") if latch.get("latched") else None
@@ -80,6 +82,30 @@ class ScaleMonitor:
             raise RuntimeError("a scan state cannot be set without an active placement")
         self.state = next_state
 
+    def prepare_live_tare(self) -> None:
+        if self.latched:
+            raise RuntimeError("remove the current plate before preparing live tare")
+        self.live_tare_pending = True
+        self._reset_candidate(preserve_candidate=False)
+
+    def set_live_tare(self, plate_weight_g: float) -> None:
+        if not math.isfinite(plate_weight_g) or plate_weight_g <= 0:
+            raise ValueError("live plate tare weight must be finite and positive")
+        if self.latched:
+            raise RuntimeError("remove the current plate before changing tare mode")
+        self.tare_mode = "live_plate"
+        self.live_plate_weight_g = float(plate_weight_g)
+        self.live_tare_pending = False
+        self._reset_candidate(preserve_candidate=False)
+
+    def set_platform_tare(self) -> None:
+        if self.latched:
+            raise RuntimeError("remove the current plate before changing tare mode")
+        self.tare_mode = "saved_plate"
+        self.live_plate_weight_g = None
+        self.live_tare_pending = False
+        self._reset_candidate(preserve_candidate=False)
+
     def observe(
         self,
         observation: ScaleObservation | None,
@@ -89,6 +115,14 @@ class ScaleMonitor:
         current_time = time.monotonic() if now is None else float(now)
         if self.latched:
             return self._observe_latched(observation)
+        if self.live_tare_pending:
+            if observation is not None and observation.status in {
+                "sensor_disconnected", "sensor_error", "overload"
+            }:
+                self.last_error = observation.status
+            elif observation is not None:
+                self.last_error = None
+            return None
         if observation is None:
             self._reset_candidate(preserve_candidate=True)
             return None

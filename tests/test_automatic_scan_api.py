@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,6 +31,7 @@ def fixture_nutrients(runtime, classes=(1, 2, 3)):
                 carbohydrates_g_per_100g=carbs,
                 fat_g_per_100g=fat,
                 source="synthetic-test-fixture",
+                source_identifier=f"test-fixture:{class_id}:{identity}:{preparation}",
                 version="fixture-v1",
                 verified=True,
             )
@@ -111,6 +113,70 @@ class AutomaticScanApiTests(unittest.TestCase):
         self.assertEqual(scan["plate_tare_weight_g"], 300)
         self.assertEqual(scan["measured_net_food_weight_g"], 450)
         self.assertEqual(scan["tare_mode"], "live_plate")
+
+    def test_live_tare_setup_prevents_empty_plate_autoscan_then_measures_added_food_once(self):
+        runtime = self.client.app.state.runtime
+        prepared = self.client.post(
+            "/api/v1/scale/tare",
+            json={"mode": "prepare_empty_plate", "confirm": "PREPARE"},
+        )
+        self.assertEqual(prepared.status_code, 200, prepared.text)
+        self.assertTrue(prepared.json()["live_tare_pending"])
+
+        empty_plate = runtime.scale_client.set_weight(300)
+        self.assertIsNone(runtime.monitor.monitor.observe(empty_plate, now=1.0))
+        self.assertEqual(runtime.repository.list_scans(), [])
+
+        tared = self.client.post(
+            "/api/v1/scale/tare",
+            json={"mode": "empty_plate", "confirm": "TARE"},
+        )
+        self.assertEqual(tared.status_code, 200, tared.text)
+        self.assertTrue(tared.json()["live_tare_active"])
+        self.assertFalse(tared.json()["live_tare_pending"])
+
+        loaded = self.client.post(
+            "/api/v1/scans/mock-placement", json={"gross_weight_g": 450}
+        )
+        self.assertEqual(loaded.status_code, 200, loaded.text)
+        scan = loaded.json()["scan"]
+        self.assertEqual(scan["tare_mode"], "live_plate")
+        self.assertIsNone(scan["measured_gross_weight_g"])
+        self.assertEqual(scan["plate_tare_weight_g"], 300)
+        self.assertEqual(scan["measured_net_food_weight_g"], 450)
+
+    def test_saved_plate_empty_first_requires_remove_and_replacement_before_food_scan(self):
+        import asyncio
+
+        self.client.post(
+            "/api/v1/plates",
+            json={"name": "test plate", "empty_plate_weight_g": 300, "make_default": True},
+        )
+        first = self.client.post(
+            "/api/v1/scans/mock-placement", json={"gross_weight_g": 300}
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        empty_scan = first.json()["scan"]
+        self.assertEqual(empty_scan["decision"], "REQUEST_PLATE_TARE")
+        self.assertEqual(empty_scan["error_code"], "plate_tare_required")
+        self.assertIn("remove", empty_scan["result_message"].lower())
+
+        food_added_without_removal = self.client.post(
+            "/api/v1/scans/mock-placement", json={"gross_weight_g": 750}
+        )
+        self.assertEqual(food_added_without_removal.status_code, 409)
+        self.assertEqual(len(self.client.get("/api/v1/scans").json()), 1)
+
+        asyncio.run(self.client.app.state.runtime.monitor.inject_mock_removal())
+        loaded = self.client.post(
+            "/api/v1/scans/mock-placement", json={"gross_weight_g": 750}
+        )
+        self.assertEqual(loaded.status_code, 200, loaded.text)
+        scan = loaded.json()["scan"]
+        self.assertEqual(scan["measured_gross_weight_g"], 750)
+        self.assertEqual(scan["plate_tare_weight_g"], 300)
+        self.assertEqual(scan["measured_net_food_weight_g"], 450)
+        self.assertEqual(len(self.client.get("/api/v1/scans").json()), 2)
 
     def test_no_plate_profile_requests_registration_without_inventing_net_weight(self):
         response = self.client.post(

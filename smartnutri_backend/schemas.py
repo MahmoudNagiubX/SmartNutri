@@ -158,9 +158,17 @@ class NutritionRecord(StrictModel):
     carbohydrates_g_per_100g: float = Field(ge=0, allow_inf_nan=False)
     fat_g_per_100g: float = Field(ge=0, allow_inf_nan=False)
     source: str = Field(min_length=1, max_length=300)
+    source_identifier: str | None = Field(default=None, min_length=1, max_length=160)
     version: str = Field(min_length=1, max_length=100)
     class_id: int | None = Field(default=None, ge=1, le=103)
     verified: bool = False
+    requires_preparation_confirmation: bool = False
+
+    @model_validator(mode="after")
+    def verified_records_need_traceable_source(self) -> "NutritionRecord":
+        if self.verified and not self.source_identifier:
+            raise ValueError("verified nutrition records require a source identifier")
+        return self
 
 
 class NutrientEstimate(StrictModel):
@@ -170,6 +178,7 @@ class NutrientEstimate(StrictModel):
     fat_g: float = Field(ge=0, allow_inf_nan=False)
     estimated: bool = True
     source: str
+    source_identifier: str | None = None
     version: str
 
 
@@ -223,13 +232,21 @@ class ScaleStatusResponse(StrictModel):
 class TareConfigurationResponse(StrictModel):
     mode: TareMode
     live_tare_active: bool
+    live_tare_pending: bool = False
     empty_plate_weight_g: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     live_tare_at: datetime | None = None
 
 
 class TareRequest(StrictModel):
-    mode: Literal["platform_empty", "empty_plate"]
-    confirm: Literal["TARE"]
+    mode: Literal["platform_empty", "empty_plate", "prepare_empty_plate"]
+    confirm: Literal["TARE", "PREPARE"]
+
+    @model_validator(mode="after")
+    def require_action_specific_confirmation(self) -> "TareRequest":
+        expected = "PREPARE" if self.mode == "prepare_empty_plate" else "TARE"
+        if self.confirm != expected:
+            raise ValueError(f"mode {self.mode} requires confirm={expected}")
+        return self
 
 
 class ScaleCalibrationRequest(StrictModel):

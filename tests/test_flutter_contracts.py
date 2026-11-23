@@ -94,6 +94,7 @@ class FlutterApiContractTests(unittest.TestCase):
             "carbohydrates_g_per_100g": 28.2,
             "fat_g_per_100g": 0.3,
             "source": "unit-test fixture only",
+            "source_identifier": "test-fixture:rice-boiled",
             "version": "test-v1",
             "verified": True,
         }
@@ -102,12 +103,14 @@ class FlutterApiContractTests(unittest.TestCase):
         record = created.json()
         self.assertTrue(record["verified"])
         self.assertEqual(record["class_id"], 66)
+        self.assertEqual(record["source_identifier"], "test-fixture:rice-boiled")
         self.assertTrue(record["id"])
         self.assertTrue(record["created_at"])
 
         listed = self.client.get("/api/v1/nutrition/records", params={"class_id": 66})
         self.assertEqual(listed.status_code, 200)
-        self.assertEqual(listed.json(), [record])
+        self.assertIn(record, listed.json())
+        self.assertTrue(any(item["source_identifier"] == "FDC:168878" for item in listed.json()))
 
     def test_native_mobile_defaults_do_not_enable_browser_cors(self):
         self.assertEqual(Settings().cors_origins, ())
