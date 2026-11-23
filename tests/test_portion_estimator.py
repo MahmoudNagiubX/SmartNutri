@@ -35,6 +35,25 @@ class PortionEstimatorTests(unittest.TestCase):
         self.assertEqual(estimates, {"rice": 90.0, "chicken": 225.0, "fries": 135.0})
         self.assertTrue(all(item.uncertainty_g > 0 for item in result.estimates))
 
+    def test_synthetic_known_multi_food_portions_report_absolute_error(self):
+        # Synthetic fixture only: this quantifies arithmetic behavior, not model accuracy.
+        synthetic_foods = [
+            prediction(1, "rice", 20, simulated=True),
+            prediction(2, "chicken", 50, simulated=True),
+            prediction(3, "fries", 30, simulated=True),
+        ]
+        synthetic_truth_g = {1: 110.0, 2: 220.0, 3: 120.0}
+        result = self.estimator.estimate(450, synthetic_foods)
+
+        absolute_errors = [
+            abs(item.estimated_weight_g - synthetic_truth_g[item.class_id])
+            for item in result.estimates
+        ]
+        mean_absolute_error_g = sum(absolute_errors) / len(absolute_errors)
+
+        self.assertTrue(result.simulated)
+        self.assertAlmostEqual(mean_absolute_error_g, 40 / 3, places=2)
+
     def test_unknown_visible_area_remains_unallocated(self):
         result = self.estimator.estimate(450, self.foods, unidentified_area_px=20)
         self.assertFalse(result.allocation_complete)
