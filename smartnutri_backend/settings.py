@@ -37,12 +37,7 @@ class Settings:
     foodseg_root: Path | None = None
     preprocessing_config_path: Path = Path(__file__).resolve().parents[1] / "configs" / "image_processing" / "baseline.json"
     control_token: str | None = None
-    cors_origins: tuple[str, ...] = (
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://localhost:3000",
-    )
+    cors_origins: tuple[str, ...] = ()
     auto_scan_enabled: bool = False
     scale_poll_interval_s: float = 0.25
     placement_threshold_g: float = 20.0
@@ -124,7 +119,7 @@ class Settings:
             origin.strip()
             for origin in os.environ.get(
                 "SMARTNUTRI_CORS_ORIGINS",
-                "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:3000,http://localhost:3000",
+                "",
             ).split(",")
             if origin.strip()
         )

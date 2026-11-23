@@ -316,6 +316,90 @@ class ScanResponse(StrictModel):
     meal: MealResponse | None = None
 
 
+class HealthResponse(StrictModel):
+    status: str
+    service: str
+    version: str
+    database: str
+    auto_scan_enabled: bool
+    scale_configured: bool
+    camera_mode: str
+    segmentation_mode: str
+    scan_state: ScanState
+
+
+class ScaleReadingResponse(StrictModel):
+    ok: bool
+    source: Literal["hx711", "mock"]
+    simulated: bool
+    sensor_connected: bool
+    tared: bool
+    calibrated: bool
+    stable: bool
+    status: str
+    unit: Literal["g"]
+    weight_g: float | None = Field(default=None, allow_inf_nan=False)
+    weight_delta_g: float | None = Field(default=None, allow_inf_nan=False)
+    stability_range_g: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    stability_threshold_g: float = Field(ge=0, allow_inf_nan=False)
+    sample_count: int = Field(ge=0)
+    window_size: int = Field(ge=0)
+    timestamp_ms: int = Field(ge=0)
+    operation: str = "none"
+    operation_status: str = "idle"
+    operation_ok: bool | None = None
+    operation_message: str = "idle"
+
+
+class ScaleCalibrationResponse(StrictModel):
+    reading: ScaleReadingResponse
+    simulated: bool
+
+
+class CameraStatusResponse(StrictModel):
+    configured: bool
+    source: str
+    simulated: bool
+    transport: str | None = None
+    reachable: bool | None = None
+    file_available: bool | None = None
+
+
+class FoodPredictionsResponse(StrictModel):
+    scan_id: str
+    predictions: list[FoodPrediction]
+    source: str
+    simulated: bool
+
+
+class PortionResponse(StrictModel):
+    scan_id: str
+    portions: PortionEstimationResult | None
+    simulated: bool
+
+
+class ScanNutritionResponse(StrictModel):
+    scan_id: str
+    measured_net_food_weight_g: float | None = Field(default=None, allow_inf_nan=False)
+    totals: NutrientEstimate | None = None
+    meal: MealResponse | None = None
+    estimated: bool
+    simulated: bool
+
+
+class NutritionRecordResponse(NutritionRecord):
+    id: str
+    created_at: datetime
+
+
+class AgentDecisionResponse(StrictModel):
+    scan_id: str
+    action: AgentAction | None = None
+    rationale: str | None = None
+    state: ScanState
+    simulated: bool
+
+
 class MockPlacementResponse(StrictModel):
     scan: ScanResponse
     simulated: Literal[True]

@@ -26,17 +26,25 @@ from smartnutri_backend.portion import ExperimentalVisualProportionEstimator
 from smartnutri_backend.repository import SQLiteRepository
 from smartnutri_backend.scale_service import MockScaleClient, ScaleMonitoringService
 from smartnutri_backend.schemas import (
+    AgentDecisionResponse,
+    CameraStatusResponse,
+    FoodPredictionsResponse,
+    HealthResponse,
     MealCorrectionRequest,
     MealResponse,
     MockPlacementResponse,
     MockPlacementRequest,
     NutritionRecord,
+    NutritionRecordResponse,
     PlateDefaultRequest,
     PlateProfile,
     PlateProfileCreate,
     PortionEstimate,
     PortionEstimationResult,
+    PortionResponse,
+    ScaleCalibrationResponse,
     ScanResponse,
+    ScanNutritionResponse,
     ScaleCalibrationRequest,
     ScaleStatusResponse,
     TareConfigurationResponse,
@@ -201,7 +209,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if supplied_token is None or not hmac.compare_digest(expected, supplied_token):
             raise HTTPException(status_code=403, detail="control token is missing or invalid")
 
-    @app.get("/api/v1/health", tags=["system"])
+    @app.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
     async def health(request: Request) -> dict[str, Any]:
         active = runtime(request)
         try:
@@ -274,7 +282,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.post("/api/v1/scale/calibrate", tags=["scale"])
+    @app.post("/api/v1/scale/calibrate", response_model=ScaleCalibrationResponse, tags=["scale"])
     async def calibrate_scale(
         payload: ScaleCalibrationRequest,
         request: Request,
@@ -345,7 +353,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="plate profile not found") from exc
 
-    @app.get("/api/v1/camera/status", tags=["camera"])
+    @app.get("/api/v1/camera/status", response_model=CameraStatusResponse, tags=["camera"])
     async def camera_status(request: Request) -> dict[str, Any]:
         return runtime(request).camera.status()
 
@@ -376,7 +384,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="scan not found")
         return _safe_scan(scan, meal=active.repository.get_meal_by_scan(scan_id))
 
-    @app.get("/api/v1/scans/{scan_id}/foods", tags=["vision"])
+    @app.get("/api/v1/scans/{scan_id}/foods", response_model=FoodPredictionsResponse, tags=["vision"])
     async def get_food_predictions(scan_id: str, request: Request) -> dict[str, Any]:
         active = runtime(request)
         scan = active.repository.get_scan(scan_id)
@@ -392,7 +400,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "simulated": simulated,
         }
 
-    @app.get("/api/v1/scans/{scan_id}/portions", tags=["portions"])
+    @app.get("/api/v1/scans/{scan_id}/portions", response_model=PortionResponse, tags=["portions"])
     async def get_portion_estimates(scan_id: str, request: Request) -> dict[str, Any]:
         scan = runtime(request).repository.get_scan(scan_id)
         if scan is None:
@@ -408,7 +416,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
         }
 
-    @app.get("/api/v1/scans/{scan_id}/nutrition", tags=["nutrition"])
+    @app.get("/api/v1/scans/{scan_id}/nutrition", response_model=ScanNutritionResponse, tags=["nutrition"])
     async def get_scan_nutrition(scan_id: str, request: Request) -> dict[str, Any]:
         active = runtime(request)
         scan = active.repository.get_scan(scan_id)
@@ -428,7 +436,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
         }
 
-    @app.get("/api/v1/scans/{scan_id}/mask.png", tags=["vision"])
+    @app.get(
+        "/api/v1/scans/{scan_id}/mask.png",
+        responses={200: {"content": {"image/png": {"schema": {"type": "string", "format": "binary"}}}}},
+        tags=["vision"],
+    )
     async def semantic_mask(scan_id: str, request: Request) -> Response:
         active = runtime(request)
         scan = active.repository.get_scan(scan_id)
@@ -439,7 +451,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="segmentation mask is unavailable")
         return FileResponse(path, media_type="image/png")
 
-    @app.get("/api/v1/scans/{scan_id}/mask/{class_id}", tags=["vision"])
+    @app.get(
+        "/api/v1/scans/{scan_id}/mask/{class_id}",
+        responses={200: {"content": {"image/png": {"schema": {"type": "string", "format": "binary"}}}}},
+        tags=["vision"],
+    )
     async def class_mask(scan_id: str, class_id: int, request: Request) -> Response:
         if not 1 <= class_id <= 103:
             raise HTTPException(status_code=422, detail="class_id must be in 1..103")
@@ -461,7 +477,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail="stored segmentation mask is invalid") from exc
         return Response(content=output.getvalue(), media_type="image/png")
 
-    @app.get("/api/v1/scans/{scan_id}/capture.jpg", tags=["camera"])
+    @app.get(
+        "/api/v1/scans/{scan_id}/capture.jpg",
+        responses={200: {"content": {"image/jpeg": {"schema": {"type": "string", "format": "binary"}}}}},
+        tags=["camera"],
+    )
     async def captured_image(scan_id: str, request: Request) -> Response:
         active = runtime(request)
         scan = active.repository.get_scan(scan_id)
@@ -472,7 +492,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="captured image is unavailable")
         return FileResponse(path, media_type="image/jpeg")
 
-    @app.get("/api/v1/scans/{scan_id}/annotated.jpg", tags=["vision"])
+    @app.get(
+        "/api/v1/scans/{scan_id}/annotated.jpg",
+        responses={200: {"content": {"image/jpeg": {"schema": {"type": "string", "format": "binary"}}}}},
+        tags=["vision"],
+    )
     async def annotated_image(scan_id: str, request: Request) -> Response:
         active = runtime(request)
         scan = active.repository.get_scan(scan_id)
@@ -531,13 +555,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "simulation_notice": "All scale values in this response are synthetic test inputs.",
         }
 
-    @app.get("/api/v1/nutrition/records", tags=["nutrition"])
+    @app.get("/api/v1/nutrition/records", response_model=list[NutritionRecordResponse], tags=["nutrition"])
     async def list_nutrition_records(request: Request, class_id: int | None = None) -> list[dict[str, Any]]:
         if class_id is not None and not 1 <= class_id <= 103:
             raise HTTPException(status_code=422, detail="class_id must be in 1..103")
         return runtime(request).nutrition.list_records(class_id=class_id)
 
-    @app.post("/api/v1/nutrition/records", status_code=status.HTTP_201_CREATED, tags=["nutrition"])
+    @app.post(
+        "/api/v1/nutrition/records",
+        response_model=NutritionRecordResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["nutrition"],
+    )
     async def create_nutrition_record(
         payload: NutritionRecord,
         request: Request,
@@ -645,7 +674,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return corrected
 
-    @app.get("/api/v1/agents/decisions/{scan_id}", tags=["agent"])
+    @app.get("/api/v1/agents/decisions/{scan_id}", response_model=AgentDecisionResponse, tags=["agent"])
     async def agent_decision(scan_id: str, request: Request) -> dict[str, Any]:
         active = runtime(request)
         scan = active.repository.get_scan(scan_id)
