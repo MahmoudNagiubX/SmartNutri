@@ -1,0 +1,4 @@
+# Local Wi-Fi credentials and PlatformIO-generated build output.
+/include/secrets.h
+/include/wifi_secrets.h
+/.pio/
