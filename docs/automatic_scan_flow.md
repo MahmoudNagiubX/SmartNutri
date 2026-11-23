@@ -35,9 +35,11 @@ net_food_weight_g = measured_gross_weight_g - saved_plate_weight_g
 If no default profile exists, or gross weight is less than or equal to the profile weight, the agent requests plate registration/correction. It does not create negative mass or take a photo for an invalid net result.
 If a profile is wrong but still lighter than the loaded gross weight, weight arithmetic alone cannot detect that bias; re-weigh the empty plate and correct the profile.
 
+In saved-plate mode, placing the empty plate by itself is an invalid zero-food placement. The backend requests a valid loaded placement and latches the current placement to prevent duplicate scans. Remove the empty plate, add food, then place the loaded plate again; the new stable placement is scanned once and the saved plate mass is subtracted once. Adding food while that first placement is still latched does not create a second automatic scan. This is a known interaction constraint for the current MVP, so the UI should surface the remove-and-replace instruction.
+
 ### Live plate tare
 
-Tare the empty platform, calibrate the scale, then place a known-empty plate. The user explicitly confirms the tare request. The backend records the stable pre-tare plate reading, asks the ESP32 to tare, and persists `live_plate` mode. Subsequent scale readings are already net food mass; the backend does not subtract the plate again. A live tare is never issued automatically. Food must not be on the plate at the time of this explicit operation. When changing back to an empty-platform tare, the service requires the live-tared plate's negative stable reading to confirm removal.
+Tare the empty platform and calibrate the scale, then ask the backend to prepare live tare while the scale is stably empty. The backend persists `live_tare_pending`, suppresses scans, and waits for an empty plate. The user places the empty plate and explicitly confirms `empty_plate`; the backend records its stable pre-tare reading, asks the ESP32 to tare, clears the pending state, and persists `live_plate` mode. Subsequent scale readings are already net food mass; the backend does not subtract the plate again. A live tare is never issued automatically. Food must not be on the plate at the time of this explicit operation. When changing back to an empty-platform tare, the service requires the live-tared plate's negative stable reading to confirm removal.
 
 If the scale is not yet tared, `platform_empty` can issue the initial explicit tare only when the HX711 is connected and the caller confirms the platform is empty. An empty plate live tare requires a stable calibrated reading. After a live-tared scan, a near-zero reading means the empty plate may still be on the scale; the monitor re-arms only after stable negative weight is consistent with the recorded empty-plate tare mass. This prevents removing food while leaving the plate from triggering another scan.
 
@@ -55,9 +57,23 @@ Only the selected image, semantic class-ID PNG, and annotated JPEG are retained 
 
 ## Multi-food vision contract
 
-The real SegFormer adapter is lazy, local-only, CPU-default, and validates the checkpoint metadata, label mapping, class count, padding label, and preprocessing metadata before inference. It outputs semantic class IDs `0..103`; background class 0 is excluded from food predictions. Each predicted food class reports its ID/name, per-pixel probability summary, visible pixel area, connected-region count, mask URL, and separate coarse segmentation-quality marker. Multiple disconnected regions of one class share one semantic class prediction; they are not guaranteed to be separate food instances.
+The real SegFormer adapter is lazy, local-only, CPU-default, and checks the FoodSeg103 label anchors and complete local class map, 104-channel model head, and preprocessing metadata before inference. The current checkpoint has 104 model classes; its older training metadata does not include optional dataset/count/padding-label fields, so the adapter rejects conflicts when those fields exist and validates class mapping against the loaded model config. The existing preprocessing configuration uses mask padding `ignore_index=255` during training; inference creates a dummy all-background mask and applies the deterministic image transform. Real inference outputs semantic class IDs `0..103`; background class 0 is excluded from food predictions. Each predicted food class reports its ID/name, confidence summary, visible pixel area, connected-region count, mask URL, and a coarse segmentation-quality marker. Multiple disconnected regions of one class share one semantic class prediction; they are not guaranteed to be separate food instances.
 
-The mock adapter returns Rice, Chicken, and Fries labels for deterministic API-path tests, all with `simulated=true`. These are fixture outputs, not FoodSeg103 mapping claims and not model accuracy.
+The mock adapter returns Rice, Chicken, and Fries labels for deterministic API-path tests using fixture IDs 1, 2, and 3, all with `simulated=true`. The real adapter rejects that arbitrary map using canonical FoodSeg103 anchors (including rice 66, chicken/duck 48, and fries 3); mock class IDs never enter real inference. Fixture outputs are not model accuracy.
+
+## Local checkpoint smoke test
+
+When a checkpoint already exists locally and no training process is using the GPU, run the standalone smoke test on CPU:
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\smoke_test_segformer.py `
+  --checkpoint-dir .\runs\foodseg103-segformer-b0\best_model `
+  --foodseg-root ..\Datasets\FoodSeg103
+```
+
+It loads the local checkpoint only, performs one CPU forward pass, prints class IDs/labels and provenance, and writes no checkpoint or dataset files. With no `--image`, the input is a synthetic mock-camera image: `input_simulated=true` while `model_output_simulated=false` indicates real model computation on synthetic pixels, not a real food photograph. Predicted labels are not accuracy measurements. The script does not download weights or data. The last recorded smoke result used the local SegFormer-B0 checkpoint, emitted 104 classes on CPU, and is not a validation score.
+
+The existing [baseline evaluation report](baseline_evaluation_report.md) is the only performance evidence: validation foreground mIoU is 0.191785; 41/103 foreground classes have zero IoU and 49/103 are below 0.05. Among the catalog's classes, the report gives apple (25) IoU 0.1855 and chicken/duck (48) 0.3243, compared with fries (3) 0.3908, rice (66) 0.5688, tomato (73) 0.5828, and broccoli (87) 0.7994. These are dataset-level semantic segmentation results, not food classification confidence for a new plate. The report also identifies strong meat-class confusion, small/fragmented region misses, and long-tail classes. Use per-image confidence and review signals at runtime; do not infer portions or nutrition accuracy from these benchmark values.
 
 ## Review and failure states
 
