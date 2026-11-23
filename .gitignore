@@ -101,6 +101,12 @@ ENV/
 *.pfx
 secrets.json
 credentials.json
+firmware/weight_scale/include/secrets.h
+**/wifi_secrets.h
+
+# PlatformIO build artifacts
+.pio/
+**/.pio/
 
 # Research papers
 *.pdf

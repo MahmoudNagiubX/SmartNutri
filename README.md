@@ -76,6 +76,10 @@ The default evaluates the official validation split. It writes `metrics.json` an
 
 This saves side-by-side source image, ground-truth overlay, and prediction overlay PNGs under the checkpoint's `visualizations` folder.
 
+## ESP32 scale and future nutrition agent
+
+The independent ESP32/HX711 scale module and Python client are documented in [docs/weight_scale.md](docs/weight_scale.md). The proposed handoff from FoodSeg103 predictions and stable real scale readings to a future laptop-side nutrition agent is documented in [docs/integration_contracts.md](docs/integration_contracts.md). The FastAPI service, model-serving endpoint, nutrition database, meal state, and AI agent are not implemented in this repository yet.
+
 To regenerate the actual-source preprocessing figure without a model or training:
 
 ```powershell
