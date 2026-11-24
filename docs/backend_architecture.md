@@ -53,7 +53,7 @@ Both measured net meal weight and per-food estimates are retained. If a portion 
 
 Start the API through `python -m smartnutri_backend.server`, which binds to `127.0.0.1` by default. A LAN deployment must set `SMARTNUTRI_API_HOST` to one explicit RFC1918 IPv4 address; wildcard, public, hostname, and IPv6 binds are rejected. Auto-scan defaults off and must be explicitly enabled after the source configuration is ready. CORS is disabled by default; optional explicit origins are only for a separate browser client. The camera adapter accepts only private, loopback, or `.local` snapshot hosts and rejects redirects outside that set. Captured images are size-limited and stored outside Git. Real tare, calibration, recapture, nutrient-record writes, and meal corrections require `X-SmartNutri-Control-Token`; real control requests fail closed if no token is configured. Mock mode is explicitly simulated and does not call ESP32 hardware.
 
-For a trusted-Wi-Fi client, bind only to the laptop's Wi-Fi IPv4 and scope inbound TCP/8000 to the Private firewall profile and the phone or trusted subnet. Do not add router port forwarding or expose the local API to the public internet. The REST/JSON and image contracts for a React dashboard are documented in [API reference](api_reference.md); the existing Android client integration remains in [Flutter Android integration](flutter_android_integration.md). Camera capture remains a separate camera-service adapter.
+For a trusted-Wi-Fi client, bind only to the laptop's Wi-Fi IPv4 and scope inbound TCP/8000 to the Private firewall profile and the phone or trusted subnet. Do not add router port forwarding or expose the local API to the public internet. The REST/JSON and image contracts for the future Flutter application are documented in [API reference](api_reference.md) and [Flutter Android integration](flutter_android_integration.md). Camera capture remains a separate camera-service adapter.
 
 ## Research relationship and evidence boundaries
 
@@ -65,9 +65,9 @@ For a trusted-Wi-Fi client, bind only to the laptop's Wi-Fi IPv4 and scope inbou
 
 These papers inform the architecture; they do not validate this implementation. Mock end-to-end results validate code paths only. The local CPU checkpoint smoke test validates that the adapter loads the present checkpoint and emits a structurally valid 104-class result using synthetic camera input; it provides no accuracy evidence. Real-scene inference, physical weighing, cooking/preparation resolution, and per-food mass accuracy remain unvalidated.
 
-## BE-02 verification snapshot
+## Audit verification snapshot
 
-On 2026-11-23, the backend, repository, scale-client, camera, agent, nutrition, scan, and CV-contract regression modules passed **115 tests** in the backend-only environment. The image-processing suite passed **18 tests** in the project environment. The local checkpoint smoke test passed on CPU with the synthetic mock-camera image and a 104-channel FoodSeg103 result. These results validate software paths and model loading only; no physical scale/camera test or real-scene accuracy evaluation was performed. The mock placement and portion values in tests are synthetic.
+On 2026-11-24, the backend, repository, scale-client, camera, agent, nutrition, scan, model-contract, and Flutter-contract suites passed **120 tests** in the isolated backend environment. The project environment passed **39 CV/data/training-experiment contract tests** (18 image processing, 7 class weighting, 10 optimized-training contracts, and 4 local experiment tests). A CPU-only smoke test loaded the existing local SegFormer-B2 checkpoint and emitted a structurally valid 104-class result for a synthetic image. An isolated FastAPI/SQLite HTTP demonstration passed saved-plate subtraction (750 g gross minus 300 g tare = 450 g net), correction/recalculation, simulated provenance, and duplicate-placement checks. These results validate software paths only; no physical scale/camera test or real-scene accuracy evaluation was performed. Mock placement and portion values are synthetic.
 
 ## Running tests
 
@@ -77,11 +77,11 @@ Install `smartnutri_backend/requirements.txt` into a backend-only environment an
 python -m unittest tests.test_agent_policy tests.test_automatic_scan_api tests.test_backend_api tests.test_backend_contracts tests.test_backend_repository tests.test_backend_settings tests.test_camera_service tests.test_flutter_contracts tests.test_nutrition_catalog tests.test_nutrition_service tests.test_portion_estimator tests.test_scale_monitor tests.test_scale_service tests.test_scan_workflow tests.test_server tests.test_vision_adapter tests.test_weight_api -v
 ```
 
-Use the project environment for preprocessing tests and the standalone CPU model smoke check:
+Use the project environment for preprocessing tests and the standalone CPU model smoke check. The current smoke evidence used the existing B2 checkpoint:
 
 ```powershell
 python -m unittest tests.test_image_processing -v
-python .\tools\smoke_test_segformer.py --checkpoint-dir .\runs\foodseg103-segformer-b0\best_model --foodseg-root ..\Datasets\FoodSeg103
+python .\tools\smoke_test_segformer.py --checkpoint-dir .\runs\foodseg103-segformer-b2-optimized-20261124_075454\best_model --foodseg-root ..\Datasets\FoodSeg103
 ```
 
-The integration fixtures are synthetic and marked as such. Unit tests do not start model training. The smoke script uses only already-present local files and does not write to the checkpoint or dataset.
+The integration fixtures are synthetic and marked as such. Unit tests do not start model training. The smoke script uses only already-present local files and does not write to the checkpoint or dataset. The B2 official-validation metrics are in [the latest CV model evaluation report](cv_model_evaluation_report.md), which supersedes the older B0 baseline as the newest performance evidence.

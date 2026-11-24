@@ -67,13 +67,13 @@ When a checkpoint already exists locally and no training process is using the GP
 
 ```powershell
 .\.venv\Scripts\python.exe .\tools\smoke_test_segformer.py `
-  --checkpoint-dir .\runs\foodseg103-segformer-b0\best_model `
+  --checkpoint-dir .\runs\foodseg103-segformer-b2-optimized-20261124_075454\best_model `
   --foodseg-root ..\Datasets\FoodSeg103
 ```
 
-It loads the local checkpoint only, performs one CPU forward pass, prints class IDs/labels and provenance, and writes no checkpoint or dataset files. With no `--image`, the input is a synthetic mock-camera image: `input_simulated=true` while `model_output_simulated=false` indicates real model computation on synthetic pixels, not a real food photograph. Predicted labels are not accuracy measurements. The script does not download weights or data. The last recorded smoke result used the local SegFormer-B0 checkpoint, emitted 104 classes on CPU, and is not a validation score.
+It loads the local checkpoint only, performs one CPU forward pass, prints class IDs/labels and provenance, and writes no checkpoint or dataset files. With no `--image`, the input is a synthetic mock-camera image: `input_simulated=true` while `model_output_simulated=false` indicates real model computation on synthetic pixels, not a real food photograph. Predicted labels are not accuracy measurements. The script does not download weights or data. The latest recorded smoke result used the existing SegFormer-B2 checkpoint, emitted 104 classes on CPU, and is not a validation score.
 
-The existing [baseline evaluation report](baseline_evaluation_report.md) is the only performance evidence: validation foreground mIoU is 0.191785; 41/103 foreground classes have zero IoU and 49/103 are below 0.05. Among the catalog's classes, the report gives apple (25) IoU 0.1855 and chicken/duck (48) 0.3243, compared with fries (3) 0.3908, rice (66) 0.5688, tomato (73) 0.5828, and broccoli (87) 0.7994. These are dataset-level semantic segmentation results, not food classification confidence for a new plate. The report also identifies strong meat-class confusion, small/fragmented region misses, and long-tail classes. Use per-image confidence and review signals at runtime; do not infer portions or nutrition accuracy from these benchmark values.
+The latest performance evidence is [the CV model evaluation report](cv_model_evaluation_report.md), which supersedes the older [B0 baseline evaluation report](baseline_evaluation_report.md). On all 2,135 official validation images, B2 measured 0.364898 foreground mIoU and 0.494406 foreground Dice in one pass; horizontal-flip test-time augmentation measured 0.369469 and 0.498852 at about 1.81x latency. These are dataset-level semantic segmentation results, not food identity, physical portion mass, or calorie accuracy for a new plate. The report identifies rare-class misses and meat-class confusion. Pixel accuracy and uncalibrated per-image softmax values are not calibrated ingredient probabilities.
 
 ## Review and failure states
 
