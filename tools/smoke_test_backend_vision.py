@@ -31,7 +31,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--foodseg-root", type=Path, default=DEFAULT_FOODSEG_ROOT)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--model-variant", choices=("b0", "b2"), default="b2")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--hflip-tta", action="store_true")
+    parser.add_argument("--min-region-area-ratio", type=float, default=0.001)
     parser.add_argument("--candidate-limit", type=int, default=40)
     return parser.parse_args()
 
@@ -72,6 +75,9 @@ def main() -> None:
             checkpoint_dir=args.checkpoint_dir.expanduser().resolve(),
             foodseg_root=foodseg_root,
             device=args.device,
+            model_variant=args.model_variant,
+            hflip_tta=args.hflip_tta,
+            min_region_area_ratio=args.min_region_area_ratio,
         )
         started = time.perf_counter()
         result = service.infer(accepted_capture, scan_id="local-vision-smoke")
@@ -99,6 +105,8 @@ def main() -> None:
         json.dumps(
             {
                 "checkpoint_dir": str(args.checkpoint_dir.expanduser().resolve()),
+                "model_variant": args.model_variant,
+                "hflip_tta": args.hflip_tta,
                 "sample_id": accepted_id,
                 "adapter_model_loaded": service.model_loaded,
                 "adapter_source": result.source,

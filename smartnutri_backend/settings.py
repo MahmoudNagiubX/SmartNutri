@@ -13,6 +13,16 @@ def _default_data_dir() -> Path:
     return root / "SmartNutri"
 
 
+def _default_cv_checkpoint(model: str) -> Path:
+    project_root = Path(__file__).resolve().parents[1]
+    run_name = (
+        "foodseg103-segformer-b2-optimized-20261124_075454"
+        if model == "b2"
+        else "foodseg103-segformer-b0"
+    )
+    return project_root / "runs" / run_name / "best_model"
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -33,8 +43,11 @@ class Settings:
     camera_snapshot_url: str | None = None
     camera_file_path: Path | None = None
     segmentation_mode: str = "mock"
+    cv_model: str = "b2"
     checkpoint_dir: Path | None = None
     foodseg_root: Path | None = None
+    cv_device: str = "auto"
+    cv_hflip_tta: bool = False
     preprocessing_config_path: Path = Path(__file__).resolve().parents[1] / "configs" / "image_processing" / "baseline.json"
     control_token: str | None = None
     cors_origins: tuple[str, ...] = ()
@@ -57,7 +70,10 @@ class Settings:
     min_edge_variance: float = 4.0
     max_clipped_pixel_fraction: float = 0.65
     min_classification_confidence: float = 0.55
+    min_food_region_area_ratio: float = 0.001
+    placement_weight_tolerance_g: float = 5.0
     portion_review_uncertainty_fraction: float = 0.20
+    scale_control_token: str | None = None
 
     def __post_init__(self) -> None:
         if self.scale_mode not in {"real", "mock", "disabled"}:
@@ -66,6 +82,10 @@ class Settings:
             raise ValueError("camera_mode must be mock, file, or ip_snapshot")
         if self.segmentation_mode not in {"mock", "segformer"}:
             raise ValueError("segmentation_mode must be mock or segformer")
+        if self.cv_model not in {"b0", "b2"}:
+            raise ValueError("cv_model must be b0 or b2")
+        if self.cv_device not in {"auto", "cpu", "cuda"}:
+            raise ValueError("cv_device must be auto, cpu, or cuda")
         positive = (
             "scale_poll_interval_s", "placement_threshold_g", "removal_threshold_g",
             "camera_timeout_s", "post_stability_delay_s", "min_brightness",
@@ -96,6 +116,10 @@ class Settings:
             raise ValueError("max_clipped_pixel_fraction must be in [0, 1]")
         if not 0 <= self.min_classification_confidence <= 1:
             raise ValueError("min_classification_confidence must be in [0, 1]")
+        if not math.isfinite(self.min_food_region_area_ratio) or not 0 <= self.min_food_region_area_ratio <= 1:
+            raise ValueError("min_food_region_area_ratio must be finite and in [0, 1]")
+        if not math.isfinite(self.placement_weight_tolerance_g) or self.placement_weight_tolerance_g <= 0:
+            raise ValueError("placement_weight_tolerance_g must be finite and positive")
         if not 0 <= self.portion_review_uncertainty_fraction <= 1:
             raise ValueError("portion_review_uncertainty_fraction must be in [0, 1]")
         for origin in self.cors_origins:
@@ -110,6 +134,11 @@ class Settings:
     @property
     def image_dir(self) -> Path:
         return self.data_dir / "images"
+
+    @property
+    def selected_checkpoint_dir(self) -> Path:
+        """Explicit checkpoint path wins; otherwise use the frozen local model run."""
+        return self.checkpoint_dir or _default_cv_checkpoint(self.cv_model)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -132,9 +161,13 @@ class Settings:
             camera_snapshot_url=os.environ.get("SMARTNUTRI_CAMERA_URL") or None,
             camera_file_path=optional_path("SMARTNUTRI_CAMERA_FILE"),
             segmentation_mode=os.environ.get("SMARTNUTRI_CV_MODE", "mock"),
+            cv_model=os.environ.get("SMARTNUTRI_CV_MODEL", "b2").strip().casefold(),
             checkpoint_dir=optional_path("SMARTNUTRI_CHECKPOINT_DIR"),
             foodseg_root=optional_path("SMARTNUTRI_FOODSEG_ROOT"),
+            cv_device=os.environ.get("SMARTNUTRI_CV_DEVICE", "auto").strip().casefold(),
+            cv_hflip_tta=_env_bool("SMARTNUTRI_CV_HFLIP_TTA", default=False),
             control_token=os.environ.get("SMARTNUTRI_CONTROL_TOKEN") or None,
+            scale_control_token=os.environ.get("SMARTNUTRI_SCALE_CONTROL_TOKEN") or None,
             cors_origins=origins,
             auto_scan_enabled=_env_bool("SMARTNUTRI_AUTO_SCAN", default=False),
             scale_poll_interval_s=float(os.environ.get("SMARTNUTRI_SCALE_POLL_INTERVAL", "0.25")),
@@ -148,6 +181,12 @@ class Settings:
             capture_burst_count=int(os.environ.get("SMARTNUTRI_CAPTURE_BURST_COUNT", "1")),
             min_classification_confidence=float(
                 os.environ.get("SMARTNUTRI_MIN_CLASSIFICATION_CONFIDENCE", "0.55")
+            ),
+            min_food_region_area_ratio=float(
+                os.environ.get("SMARTNUTRI_MIN_FOOD_REGION_AREA_RATIO", "0.001")
+            ),
+            placement_weight_tolerance_g=float(
+                os.environ.get("SMARTNUTRI_PLACEMENT_WEIGHT_TOLERANCE_G", "5.0")
             ),
             portion_review_uncertainty_fraction=float(
                 os.environ.get("SMARTNUTRI_PORTION_REVIEW_UNCERTAINTY_FRACTION", "0.20")

@@ -2,15 +2,19 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from PIL import Image
+import torch
 
 from smartnutri_backend.camera import CapturedImage, MockCameraService
 from smartnutri_backend.vision import (
     FoodSegLabelMap,
     MockSegmentationService,
     SegFormerInferenceService,
+    _forward_segformer_logits,
     validate_foodseg103_label_anchors,
+    validate_model_architecture,
 )
 
 
@@ -96,6 +100,36 @@ class VisionAdapterTests(unittest.TestCase):
         Config.label2id = {label: class_id for class_id, label in labels.labels.items()}
         with self.assertRaises(ValueError):
             validate_model_label_contract(Config, 150, labels)
+
+    def test_model_variant_validation_distinguishes_b0_and_b2(self):
+        b2 = SimpleNamespace(
+            depths=[3, 4, 6, 3],
+            hidden_sizes=[64, 128, 320, 512],
+            decoder_hidden_size=768,
+        )
+        validate_model_architecture(b2, "b2")
+        with self.assertRaisesRegex(ValueError, "architecture"):
+            validate_model_architecture(b2, "b0")
+
+    def test_horizontal_flip_tta_unflips_and_averages_logits(self):
+        class FakeModel:
+            def __init__(self):
+                self.inputs = []
+
+            def __call__(self, *, pixel_values):
+                self.inputs.append(pixel_values.clone())
+                return SimpleNamespace(logits=pixel_values[:, :1])
+
+        values = torch.arange(12, dtype=torch.float32).reshape(1, 1, 3, 4).repeat(1, 3, 1, 1)
+        model = FakeModel()
+        logits = _forward_segformer_logits(model, values, hflip_tta=True)
+        self.assertEqual(len(model.inputs), 2)
+        self.assertTrue(torch.equal(model.inputs[1], values.flip(-1)))
+        self.assertTrue(torch.equal(logits, values[:, :1]))
+
+        single_model = FakeModel()
+        _forward_segformer_logits(single_model, values, hflip_tta=False)
+        self.assertEqual(len(single_model.inputs), 1)
 
     def test_captured_image_type_carries_source_provenance(self):
         capture = MockCameraService().capture_best()

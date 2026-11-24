@@ -266,6 +266,7 @@ class WeightClient:
         self,
         base_url: str | None = None,
         *,
+        control_token: str | None = None,
         timeout_s: float = 3.0,
         mock_weight_g: float | None = None,
         operation_timeout_s: float = 10.0,
@@ -281,6 +282,9 @@ class WeightClient:
         if not math.isfinite(retry_delay_s) or retry_delay_s < 0:
             raise ValueError("retry_delay_s must be finite and non-negative")
         self.base_url = (base_url or "").rstrip("/")
+        if control_token is not None and not control_token.strip():
+            raise ValueError("control_token must be non-empty when supplied")
+        self.control_token = control_token.strip() if control_token else None
         self.timeout_s = float(timeout_s)
         self.operation_timeout_s = float(operation_timeout_s)
         self.max_get_retries = max_get_retries
@@ -346,12 +350,16 @@ class WeightClient:
                 raise TimeoutError("scale did not produce a stable reading before timeout")
             time.sleep(min(poll_interval_s, remaining))
 
-    def tare(self) -> WeightReading:
+    def tare(self, *, confirmation: str | None = None) -> WeightReading:
         if self.mock_weight_g is not None:
             self.mock_weight_g = 0.0
             self._mock_last_weight_g = None
             return self._mock_reading()
-        payload = self._request("POST", "/tare", form={})
+        if confirmation != "TARE":
+            raise PermissionError("tare requires confirmation='TARE'")
+        if not self.control_token:
+            raise PermissionError("hardware tare requires a configured scale control token")
+        payload = self._request("POST", "/tare", form={"confirm": confirmation})
         return self._await_operation(payload, "tare")
 
     def calibrate(self, known_weight_g: float, *, confirmation: str | None = None) -> WeightReading:
@@ -362,6 +370,8 @@ class WeightClient:
             raise PermissionError("calibration requires confirmation='CALIBRATE'")
         if self.mock_weight_g is not None:
             raise RuntimeError("calibration is unavailable in mock mode")
+        if not self.control_token:
+            raise PermissionError("hardware calibration requires a configured scale control token")
         payload = self._request(
             "POST",
             "/calibrate",
@@ -443,6 +453,10 @@ class WeightClient:
         headers = {"Accept": "application/json"}
         if form is not None:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
+        if method.upper() == "POST":
+            if not self.control_token:
+                raise PermissionError("hardware control requests require a configured scale control token")
+            headers["X-SmartNutri-Control-Token"] = self.control_token
         request = Request(self.base_url + path, data=data, headers=headers, method=method)
         attempts = self.max_get_retries + 1 if method.upper() == "GET" else 1
         for attempt in range(attempts):

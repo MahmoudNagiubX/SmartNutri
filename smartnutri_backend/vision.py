@@ -26,6 +26,19 @@ FOODSEG103_LABEL_ANCHORS = {
     87: "broccoli",
 }
 
+SEGFORMER_ARCHITECTURES = {
+    "b0": {
+        "depths": (2, 2, 2, 2),
+        "hidden_sizes": (32, 64, 160, 256),
+        "decoder_hidden_size": 256,
+    },
+    "b2": {
+        "depths": (3, 4, 6, 3),
+        "hidden_sizes": (64, 128, 320, 512),
+        "decoder_hidden_size": 768,
+    },
+}
+
 
 def validate_foodseg103_label_anchors(labels: FoodSegLabelMap) -> None:
     """Catch mock/arbitrary class IDs before a real checkpoint can use them."""
@@ -225,6 +238,14 @@ class MockSegmentationService:
         )
 
 
+def _forward_segformer_logits(model: Any, pixel_values: Any, *, hflip_tta: bool) -> Any:
+    logits = model(pixel_values=pixel_values).logits.float()
+    if hflip_tta:
+        flipped_logits = model(pixel_values=pixel_values.flip(-1)).logits.float().flip(-1)
+        logits = (logits + flipped_logits) * 0.5
+    return logits
+
+
 class SegFormerInferenceService:
     """Lazy, local-only SegFormer inference adapter; no model is loaded on API startup."""
 
@@ -237,16 +258,29 @@ class SegFormerInferenceService:
         checkpoint_dir: str | Path | None,
         foodseg_root: str | Path | None,
         preprocessing_config_path: str | Path | None = None,
-        device: str = "cpu",
+        device: str = "auto",
+        model_variant: str = "b2",
+        hflip_tta: bool = False,
+        min_region_area_ratio: float = 0.001,
     ) -> None:
+        if model_variant not in SEGFORMER_ARCHITECTURES:
+            raise ValueError("model_variant must be b0 or b2")
+        if device not in {"auto", "cpu", "cuda"}:
+            raise ValueError("device must be auto, cpu, or cuda")
+        if not 0 <= min_region_area_ratio <= 1:
+            raise ValueError("min_region_area_ratio must be in [0, 1]")
         self.checkpoint_dir = Path(checkpoint_dir).expanduser() if checkpoint_dir else None
         self.foodseg_root = Path(foodseg_root).expanduser() if foodseg_root else None
         self.preprocessing_config_path = (
             Path(preprocessing_config_path).expanduser() if preprocessing_config_path else None
         )
         self.device_name = device
+        self.model_variant = model_variant
+        self.hflip_tta = hflip_tta
+        self.min_region_area_ratio = min_region_area_ratio
         self._model: Any = None
         self._torch: Any = None
+        self._device: Any = None
         self._preprocessing: Any = None
         self._labels: FoodSegLabelMap | None = None
 
@@ -291,9 +325,18 @@ class SegFormerInferenceService:
             str(self.checkpoint_dir), local_files_only=True, trust_remote_code=False
         )
         validate_model_label_contract(model.config, model.decode_head.classifier.out_channels, labels)
+        validate_model_architecture(model.config, self.model_variant)
         model.eval()
-        model.to(self.device_name)
+        device = (
+            torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if self.device_name == "auto"
+            else torch.device(self.device_name)
+        )
+        if device.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("CUDA inference was requested but CUDA is unavailable")
+        model.to(device)
         self._torch = torch
+        self._device = device
         self._preprocessing = PreprocessingConfig.from_dict(preprocessing_values)
         self._labels = labels
         self._model = model
@@ -301,7 +344,7 @@ class SegFormerInferenceService:
     def infer(self, image: CapturedImage, *, scan_id: str) -> SegmentationResult:
         self._load()
         assert self._model is not None and self._labels is not None
-        assert self._torch is not None and self._preprocessing is not None
+        assert self._torch is not None and self._device is not None and self._preprocessing is not None
         torch = self._torch
         import torch.nn.functional as functional
         with Image.open(io.BytesIO(image.image_bytes)) as opened:
@@ -316,9 +359,13 @@ class SegFormerInferenceService:
             training=False,
         )
         size = self._preprocessing.image_size
+        model_input = pixel_values.unsqueeze(0).to(self._device)
         with torch.inference_mode():
-            output = self._model(pixel_values=pixel_values.unsqueeze(0).to(self.device_name))
-            logits = output.logits.float()
+            logits = _forward_segformer_logits(
+                self._model,
+                model_input,
+                hflip_tta=self.hflip_tta,
+            )
             low_res_class_ids = logits.argmax(dim=1)[0]
             low_res_probabilities = torch.softmax(logits[0], dim=0)
             canvas_class_ids = functional.interpolate(
@@ -348,7 +395,11 @@ class SegFormerInferenceService:
             selected = low_ids == class_id
             confidence = float(confidence_map[class_id][selected].mean().item()) if selected.any() else 0.0
             region_count = max(1, regions.get(class_id, 1))
-            quality_status = "small_region" if area < max(32, original_width * original_height * 0.001) else "unverified"
+            minimum_area = max(
+                1,
+                int(original_width * original_height * self.min_region_area_ratio + 0.999999),
+            )
+            quality_status = "small_region" if area < minimum_area else "unverified"
             if region_count > 16:
                 quality_status = "fragmented"
             predictions.append(
@@ -392,3 +443,19 @@ def validate_model_label_contract(config: Any, head_channels: int, labels: FoodS
     expected_label2id = {label: class_id for class_id, label in labels.labels.items()}
     if id2label != labels.labels or label2id != expected_label2id:
         raise ValueError("SegFormer id2label/label2id must exactly match local FoodSeg103 id2label.json")
+
+
+def validate_model_architecture(config: Any, model_variant: str) -> None:
+    expected = SEGFORMER_ARCHITECTURES.get(model_variant)
+    if expected is None:
+        raise ValueError("model_variant must be b0 or b2")
+    actual = {
+        "depths": tuple(getattr(config, "depths", ())),
+        "hidden_sizes": tuple(getattr(config, "hidden_sizes", ())),
+        "decoder_hidden_size": getattr(config, "decoder_hidden_size", None),
+    }
+    if actual != expected:
+        raise ValueError(
+            f"configured SegFormer-{model_variant.upper()} does not match checkpoint architecture: "
+            f"{actual}"
+        )

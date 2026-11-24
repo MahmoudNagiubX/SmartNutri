@@ -215,7 +215,9 @@ For browser-based development tools on a separate origin, set `SMARTNUTRI_CORS_O
 
 ## Control and deployment
 
-Real `POST /api/v1/scale/tare`, `/api/v1/scale/calibrate`, scan/camera recapture, nutrition-record writes, and meal corrections require `X-SmartNutri-Control-Token: <secret>`. Set `SMARTNUTRI_CONTROL_TOKEN` outside the repository; real controls fail closed when it is unset. Mock-mode control calls are explicitly simulated and never actuate hardware. The supported server launcher defaults to `127.0.0.1`; for a trusted Wi-Fi client, set `SMARTNUTRI_API_HOST` to the laptop's explicit RFC1918 IPv4 address and allow only the Android device or trusted home subnet through the Windows Private-profile firewall. Do not bind to `0.0.0.0` or expose the API publicly. CORS is disabled by default; configure `SMARTNUTRI_CORS_ORIGINS` only for an intentional browser client. Do not commit tokens, camera credentials, runtime images, database files, or nutrient-source credentials. See [Flutter Android integration](flutter_android_integration.md) for the mobile client contract.
+Real `POST /api/v1/scale/tare`, `/api/v1/scale/calibrate`, scan/camera recapture, nutrition-record writes, and meal corrections require `X-SmartNutri-Control-Token: <secret>`. Set `SMARTNUTRI_CONTROL_TOKEN` outside the repository; real controls fail closed when it is unset. The ESP32 also requires `X-SmartNutri-Control-Token` and an explicit `confirm=TARE` form field for direct HTTP tare; it rejects remote actuation if no 32-character local device token is configured. The host's `SMARTNUTRI_SCALE_CONTROL_TOKEN` must match the ignored firmware `secrets.h`. Mock-mode control calls are explicitly simulated and never actuate hardware. The supported server launcher defaults to `127.0.0.1`; for a trusted Wi-Fi client, set `SMARTNUTRI_API_HOST` to the laptop's explicit RFC1918 IPv4 address and allow only the Android device or trusted home subnet through the Windows Private-profile firewall. The ESP32 HTTP API remains plain HTTP, so keep it on a trusted isolated LAN and never expose it publicly. Do not bind the backend to `0.0.0.0`. CORS is disabled by default; configure `SMARTNUTRI_CORS_ORIGINS` only for an intentional browser client. Do not commit tokens, camera credentials, runtime images, database files, or nutrient-source credentials. See [Flutter Android integration](flutter_android_integration.md) for the mobile client contract.
+
+The `/api/v1` response schema is frozen by [the OpenAPI v1 snapshot](contracts/openapi-v1.json); `tests/test_flutter_contracts.py` compares the running contract against this checked-in document. Additive or breaking contract changes require a deliberate snapshot update and corresponding client review.
 
 Common environment configuration:
 
@@ -227,12 +229,32 @@ Common environment configuration:
 | `SMARTNUTRI_CAMERA_MODE` | `mock`, `file`, or `ip_snapshot`. |
 | `SMARTNUTRI_CAMERA_FILE` / `SMARTNUTRI_CAMERA_URL` | Test-image path or private phone snapshot URL. |
 | `SMARTNUTRI_CV_MODE` | `mock` or `segformer`. |
-| `SMARTNUTRI_CHECKPOINT_DIR` / `SMARTNUTRI_FOODSEG_ROOT` | Local checkpoint and FoodSeg103 label metadata for real inference. Files are never downloaded by the service. |
+| `SMARTNUTRI_CV_MODEL` | Preferred local architecture, `b2` by default; `b0` remains available for benchmarking. |
+| `SMARTNUTRI_CV_DEVICE` | `auto` (CUDA when available, otherwise CPU), `cuda`, or `cpu`; default `auto`. |
+| `SMARTNUTRI_CV_HFLIP_TTA` | `true` to average original and horizontally flipped logits; default `false` because it roughly doubles forward latency. |
+| `SMARTNUTRI_CHECKPOINT_DIR` / `SMARTNUTRI_FOODSEG_ROOT` | Optional checkpoint override and **required** local FoodSeg103 label metadata for real inference. With no checkpoint override, B2 selects the completed local run; B0 selects its local baseline run. Files are never downloaded by the service. Set `SMARTNUTRI_CV_MODEL=b0` when benchmarking B0. |
 | `SMARTNUTRI_AUTO_SCAN` | `true` to start background polling; default is `false`. |
 | `SMARTNUTRI_MIN_CLASSIFICATION_CONFIDENCE` | Minimum food-class confidence before area allocation; default is `0.55`. |
+| `SMARTNUTRI_MIN_FOOD_REGION_AREA_RATIO` | Minimum predicted region area as a fraction of the source image; default is `0.001` (0.1%). Smaller/fragmented or low-confidence classes remain visible as uncertain and are withheld from portion allocation. |
+| `SMARTNUTRI_PLACEMENT_WEIGHT_TOLERANCE_G` | Maximum stable scale change allowed while capture/inference runs; default is `5.0` g. A failed fresh reading, unstable reading, changed placement key, or larger weight delta sends the scan to review. |
 | `SMARTNUTRI_PORTION_REVIEW_UNCERTAINTY_FRACTION` | Maximum per-item uncertainty as a fraction of total net weight before agent review; default is `0.20`. |
 | `SMARTNUTRI_CONTROL_TOKEN` | Secret required for real write/control operations. |
+| `SMARTNUTRI_SCALE_CONTROL_TOKEN` | At least 32-character secret shared with the ESP32 for direct tare/calibration calls; keep it separate from app-distributed configuration. |
 | `SMARTNUTRI_API_HOST` / `SMARTNUTRI_API_PORT` | Server launcher address and port; defaults to `127.0.0.1:8000`, and non-private/public binds are rejected. |
 | `SMARTNUTRI_CORS_ORIGINS` | Optional comma-separated explicit browser origins; empty by default and wildcards are rejected. |
+
+To launch the frozen B2 model in this checkout, keep its weights local and run:
+
+```powershell
+$env:SMARTNUTRI_CV_MODE = 'segformer'
+$env:SMARTNUTRI_CV_MODEL = 'b2'
+$env:SMARTNUTRI_CV_DEVICE = 'auto'
+$env:SMARTNUTRI_FOODSEG_ROOT = (Resolve-Path '..\Datasets\FoodSeg103').Path
+$env:SMARTNUTRI_SCALE_MODE = 'mock'
+$env:SMARTNUTRI_CAMERA_MODE = 'mock'
+.\.venv\Scripts\python.exe -m smartnutri_backend.server
+```
+
+`SMARTNUTRI_CHECKPOINT_DIR` can be omitted for the completed local B2 run; set it only to select a different local checkpoint. Use `SMARTNUTRI_CV_HFLIP_TTA=true` only when accepting the separately measured roughly 1.81x inference latency. To benchmark B0, set `SMARTNUTRI_CV_MODEL=b0`.
 
 For hardware, use `SMARTNUTRI_SCALE_MODE=real`, set the ESP32 base URL, use the phone app's private snapshot URL, and keep auto-scan disabled until tare, calibration, camera, and local inference have been checked individually. Set `SMARTNUTRI_AUTO_SCAN=true` only after those checks. Real SegFormer mode requires an already-present local FoodSeg103 checkpoint with training metadata; if missing or inconsistent, inference fails closed for review.

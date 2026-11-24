@@ -70,6 +70,8 @@ class ScaleMonitoringService:
         self.workflow = workflow
         self.settings = settings
         self.allow_simulated = allow_simulated
+        if hasattr(self.workflow, "placement_validator"):
+            self.workflow.placement_validator = self.validate_active_placement
         tare = repository.get_tare_configuration()
         default_plate = repository.get_default_plate()
         restored_latch = repository.get_monitor_latch()
@@ -195,6 +197,34 @@ class ScaleMonitoringService:
                 self.workflow.cancel(scan["id"])
         return event
 
+    async def validate_active_placement(
+        self,
+        placement_key: str,
+        expected: ScaleObservation,
+    ) -> str | None:
+        """Re-read the live scale before accepting camera/model output for a placement."""
+        if self.monitor.active_placement_key != placement_key:
+            return "The active scale placement changed while the image was being processed."
+        if self.client is None:
+            return "The scale is unavailable for placement revalidation."
+        try:
+            current = self.to_observation(await asyncio.to_thread(self.client.get_weight))
+        except Exception:
+            return "A fresh scale reading could not be obtained; discard this scan and retry."
+        if not current.usable_stable or current.weight_g is None:
+            return "The scale became stale or unstable while the image was being processed."
+        if current.source != expected.source or current.simulated != expected.simulated:
+            return "The scale source changed while the image was being processed."
+        if expected.weight_g is None:
+            return "The original placement did not contain a usable stable weight."
+        difference_g = abs(current.weight_g - expected.weight_g)
+        if difference_g > self.settings.placement_weight_tolerance_g:
+            return (
+                "The scale weight changed by more than the configured placement tolerance; "
+                "the image and weight may belong to different plate states."
+            )
+        return None
+
     async def _run_scan(self, scan_id: str, observation: ScaleObservation) -> None:
         try:
             await self.workflow.process(scan_id=scan_id, observation=observation)
@@ -293,7 +323,11 @@ class ScaleMonitoringService:
             tare_mode = "saved_plate"
         else:
             raise ValueError("tare mode must be platform_empty or empty_plate")
-        result = self.client.tare()
+        result = (
+            self.client.tare()
+            if current.simulated
+            else self.client.tare(confirmation="TARE")
+        )
         if isinstance(result, ScaleObservation):
             if result.simulated != current.simulated:
                 raise RuntimeError("tare result source does not match the current scale source")

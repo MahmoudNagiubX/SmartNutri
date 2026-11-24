@@ -124,15 +124,24 @@ class WeightApiTests(unittest.TestCase):
 
     def test_real_client_never_treats_mock_tare_response_as_hardware(self) -> None:
         payload = mock_weight_payload() | {"operation": "tare", "operation_ok": True}
+        client = WeightClient("http://scale.local", control_token="s" * 32)
         with patch(
             "smartnutri_weight.client.urlopen", return_value=http_response(payload)
         ) as urlopen:
             with self.assertRaisesRegex(RuntimeError, "simulated"):
-                WeightClient("http://scale.local").tare()
+                client.tare(confirmation="TARE")
 
         request = urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "http://scale.local/tare")
         self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(request.get_header("X-smartnutri-control-token"), "s" * 32)
+        self.assertEqual(request.data, b"confirm=TARE")
+
+    def test_hardware_tare_requires_confirmation_and_a_secret(self) -> None:
+        with self.assertRaisesRegex(PermissionError, "confirmation='TARE'"):
+            WeightClient("http://scale.local", control_token="s" * 32).tare()
+        with self.assertRaisesRegex(PermissionError, "control token"):
+            WeightClient("http://scale.local").tare(confirmation="TARE")
 
     def test_async_tare_poll_does_not_hide_a_simulated_result(self) -> None:
         pending = mock_weight_payload(
@@ -147,11 +156,11 @@ class WeightApiTests(unittest.TestCase):
             operation_ok=True,
             operation_message="tare_saved",
         )
-        client = WeightClient("http://scale.local", retry_delay_s=0)
+        client = WeightClient("http://scale.local", control_token="s" * 32, retry_delay_s=0)
         with patch.object(client, "_request", side_effect=[pending, completed]) as request:
             with patch("smartnutri_weight.client.time.sleep"):
                 with self.assertRaisesRegex(RuntimeError, "simulated"):
-                    client.tare()
+                    client.tare(confirmation="TARE")
 
         self.assertEqual(request.call_args_list[-1].args, ("GET", "/weight"))
 
@@ -167,11 +176,11 @@ class WeightApiTests(unittest.TestCase):
             operation_ok=False,
             operation_message="sensor_disconnected",
         )
-        client = WeightClient("http://scale.local", retry_delay_s=0)
+        client = WeightClient("http://scale.local", control_token="s" * 32, retry_delay_s=0)
         with patch.object(client, "_request", side_effect=[pending, failed]):
             with patch("smartnutri_weight.client.time.sleep"):
                 with self.assertRaisesRegex(RuntimeError, "sensor_disconnected"):
-                    client.tare()
+                    client.tare(confirmation="TARE")
 
     def test_confirmed_calibration_posts_expected_form_but_rejects_mock_result(self) -> None:
         pending = mock_weight_payload(
@@ -186,7 +195,7 @@ class WeightApiTests(unittest.TestCase):
             operation_ok=True,
             operation_message="calibration_saved",
         )
-        client = WeightClient("http://scale.local", retry_delay_s=0)
+        client = WeightClient("http://scale.local", control_token="s" * 32, retry_delay_s=0)
         with patch.object(client, "_request", side_effect=[pending, completed]) as request:
             with patch("smartnutri_weight.client.time.sleep"):
                 with self.assertRaisesRegex(RuntimeError, "simulated"):
@@ -207,9 +216,10 @@ class WeightApiTests(unittest.TestCase):
         self.assertTrue(reading.simulated)
         self.assertEqual(urlopen.call_count, 2)
 
+        client = WeightClient("http://scale.local", control_token="s" * 32, retry_delay_s=0)
         with patch("smartnutri_weight.client.urlopen", side_effect=URLError("offline")) as urlopen:
             with self.assertRaises(URLError):
-                client.tare()
+                client.tare(confirmation="TARE")
         self.assertEqual(urlopen.call_count, 1)
 
     def test_http_error_body_is_reported_after_bounded_get_retry(self) -> None:

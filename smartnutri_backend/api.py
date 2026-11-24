@@ -100,7 +100,11 @@ def _scale_client(settings: Settings) -> Any:
         return None
     from smartnutri_weight.client import WeightClient
 
-    return WeightClient(settings.scale_base_url, timeout_s=2.0)
+    return WeightClient(
+        settings.scale_base_url,
+        timeout_s=2.0,
+        control_token=settings.scale_control_token,
+    )
 
 
 def _safe_scan(scan: dict[str, Any], *, meal: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -137,11 +141,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             inference = MockSegmentationService()
         else:
             inference = SegFormerInferenceService(
-                checkpoint_dir=resolved_settings.checkpoint_dir,
+                checkpoint_dir=resolved_settings.selected_checkpoint_dir,
                 foodseg_root=resolved_settings.foodseg_root,
                 # Real inference loads the exact preprocessing config embedded in checkpoint metadata.
                 preprocessing_config_path=None,
-                device="cpu",
+                device=resolved_settings.cv_device,
+                model_variant=resolved_settings.cv_model,
+                hflip_tta=resolved_settings.cv_hflip_tta,
+                min_region_area_ratio=resolved_settings.min_food_region_area_ratio,
             )
         nutrition = NutritionService(repository)
         nutrition.seed_catalog(CURATED_NUTRITION_RECORDS)
@@ -150,6 +157,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             camera=camera,
             inference=inference,
             portion_estimator=ExperimentalVisualProportionEstimator(),
+            min_region_area_ratio=resolved_settings.min_food_region_area_ratio,
             agent=NutritionDecisionAgent(
                 min_classification_confidence=resolved_settings.min_classification_confidence,
                 max_portion_uncertainty_fraction=resolved_settings.portion_review_uncertainty_fraction,

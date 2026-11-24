@@ -58,9 +58,10 @@ def main() -> int:
     parser.add_argument(
         "--checkpoint-dir",
         type=Path,
-        default=PROJECT_ROOT / "runs" / "foodseg103-segformer-b0" / "best_model",
+        default=PROJECT_ROOT / "runs" / "foodseg103-segformer-b2-optimized-20261124_075454" / "best_model",
         help="Existing local checkpoint directory; never downloaded.",
     )
+    parser.add_argument("--model-variant", choices=("b0", "b2"), default="b2")
     parser.add_argument(
         "--foodseg-root",
         type=Path,
@@ -85,11 +86,13 @@ def main() -> int:
         checkpoint_dir=args.checkpoint_dir,
         foodseg_root=args.foodseg_root,
         device="cpu",
+        model_variant=args.model_variant,
     )
     result = service.infer(capture, scan_id="local-segformer-smoke")
     print(json.dumps({
         "status": "passed",
         "checkpoint_dir": str(args.checkpoint_dir.expanduser().resolve()),
+        "model_variant": args.model_variant,
         "device": "cpu",
         "model_loaded": service.model_loaded,
         "num_labels": 104,

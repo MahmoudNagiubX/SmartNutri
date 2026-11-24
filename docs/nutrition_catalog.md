@@ -20,7 +20,30 @@ All nutrition values below are per 100 g: energy in kcal and protein, carbohydra
 | Broccoli | Raw | 87 broccoli | 34 | 2.82 | 6.64 | 0.37 | [FDC 170379](https://fdc.nal.usda.gov/food-details/170379/nutrients) |
 | Red ripe tomatoes | Raw, year-round average | 73 tomato | 18 | 0.88 | 3.89 | 0.20 | [FDC 170457](https://fdc.nal.usda.gov/food-details/170457/nutrients) |
 
-This is 11 source records across eight food identities. The source identifier stored in SQLite is `FDC:<number>` and the version is `SR Legacy final release, April 2018`.
+This original seed contains 11 source records. The source identifier stored in SQLite is `FDC:<number>` and the version is `SR Legacy final release, April 2018`.
+
+## Expanded FoodSeg103 candidate catalog
+
+The current seed contains **92 exact USDA records**: the original 11 plus 81 additional records verified against the official SR Legacy CSV archive on 2026-11-24. The added records cover **61 additional FoodSeg103 classes**; together, **68 of 103 foreground classes** have at least one traceable source candidate. The remaining 35 classes have no curated record. The full ID, source preparation descriptor and per-100 g values are in [the coverage matrix](audit/nutrition_coverage.csv).
+
+Every record requires explicit identity/preparation confirmation. The segmentation label does not reliably establish the food's cultivar, animal, cut, cooking method or recipe. Therefore, automatic class-only nutrition lookup currently resolves **zero** classes. This is deliberate: candidates expand available verified source data without turning a broad class into a forced mapping.
+
+| Common ingredient candidate | FoodSeg103 class | USDA FDC source IDs |
+| --- | ---: | --- |
+| Egg, whole | 24 | FDC:171287 raw; FDC:173424 hard-boiled |
+| Dates | 26 | FDC:168191 Medjool; FDC:171726 Deglet Noor |
+| Fish, tilapia | 54 | FDC:175176 raw; FDC:175177 cooked, dry heat |
+| Shrimp | 56 | FDC:175179 raw; FDC:175180 cooked |
+| Pita bread | 58 | FDC:174915 white enriched; FDC:174916 whole-wheat |
+| Eggplant | 69 | FDC:169228 raw |
+| Potato | 70 | FDC:170026 flesh and skin, raw |
+| Garlic | 71 | FDC:169230 raw |
+| Okra | 79 | FDC:169260 raw |
+| Green beans | 95 | FDC:169961 raw; FDC:169141 boiled, drained |
+| Onion | 93 | FDC:170000 raw |
+| Pepper | 94 | FDC:170427 sweet green; FDC:170106 red chili; FDC:170497 green chili |
+
+These are source-record candidates, not default Egyptian recipes. Molokhia, koshari, ful medames, taameya, stews and other composite dishes are not inferred from individual pixels or assigned a generic recipe value.
 
 ## Safe mapping behavior
 
@@ -28,7 +51,7 @@ This is 11 source records across eight food identities. The source identifier st
 - FoodSeg103 class 48 is literally `chicken duck`. The model cannot determine which animal is present. Chicken and duck remain distinct catalog identities and both require explicit identification/preparation selection.
 - Apple's class does not identify variety or skin state. The catalog record is specifically raw Golden Delicious with skin. Other apple forms require an explicit suitable source record.
 - Banana and tomato records are raw; they are not reused for cooked or prepared products.
-- The fries row is a fast-food French-fried-in-vegetable-oil reference, not a universal value for all fry recipes. Treat the returned value as a database-based estimate and keep it reviewable.
+- The fries row is a fast-food French-fried-in-vegetable-oil reference, not a universal value for all fry recipes. It now requires explicit user selection and remains reviewable.
 - Mock scan fixtures use identifiers prefixed `test-fixture:` and are isolated from USDA records. A simulated scan cannot resolve to a real USDA record and a real scan cannot resolve to a test fixture.
 - No food record is synthesized from a segmentation label. If an identity/preparation is unknown or a source mapping is missing, item nutrients and meal totals remain null until correction.
 

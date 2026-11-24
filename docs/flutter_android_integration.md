@@ -1,6 +1,6 @@
 # Flutter Android Integration Contract
 
-BE-02 prepares the backend contract for a native Flutter/Dart Android client. It does not create a Flutter project or app code. The API is versioned REST over HTTP with JSON request and response bodies; image resources use PNG or JPEG. FastAPI publishes the contract at `/openapi.json`, with Pydantic response schemas that can feed an OpenAPI-to-Dart model generator.
+BE-02 prepares the backend contract for a native Flutter/Dart Android client. It does not create a Flutter project or app code. The API is versioned REST over HTTP with JSON request and response bodies; image resources use PNG or JPEG. FastAPI publishes the contract at `/openapi.json`; the frozen checked-in schema is [OpenAPI v1](contracts/openapi-v1.json), and backend tests compare the live schema against it.
 
 ## Mobile-first flow
 

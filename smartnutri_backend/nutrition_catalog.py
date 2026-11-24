@@ -1,4 +1,4 @@
-"""Small, source-traceable USDA SR Legacy catalog for initial demos.
+"""Source-traceable USDA SR Legacy records and FoodSeg103 candidates.
 
 Values are per 100 g. FDC identifiers are retained verbatim so every item can
 be checked against the original FoodData Central record. Preparation-sensitive
@@ -8,6 +8,8 @@ calculated automatically.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 
 USDA_SOURCE = "USDA FoodData Central"
 USDA_SR_LEGACY_VERSION = "SR Legacy final release, April 2018"
@@ -96,7 +98,7 @@ CURATED_NUTRITION_RECORDS: list[dict[str, object]] = [
         "source_identifier": "FDC:170698",
         "version": USDA_SR_LEGACY_VERSION,
         "verified": True,
-        "requires_preparation_confirmation": False,
+        "requires_preparation_confirmation": True,
     },
     {
         "class_id": 25,
@@ -169,3 +171,11 @@ CURATED_NUTRITION_RECORDS: list[dict[str, object]] = [
         "requires_preparation_confirmation": True,
     },
 ]
+
+_candidate_catalog_path = Path(__file__).with_name("usda_foodseg103_candidates.json")
+_candidate_records = json.loads(_candidate_catalog_path.read_text(encoding="utf-8"))
+if not isinstance(_candidate_records, list):
+    raise ValueError("USDA FoodSeg103 candidate catalog must contain a JSON array")
+if any(not item.get("requires_preparation_confirmation", False) for item in _candidate_records):
+    raise ValueError("USDA FoodSeg103 candidate records must require explicit user confirmation")
+CURATED_NUTRITION_RECORDS.extend(_candidate_records)

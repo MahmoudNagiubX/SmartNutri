@@ -1,5 +1,7 @@
 # SmartNutri Full Project Audit
 
+Historical audit snapshot. The current CV/backend status supersedes the stale integration gaps in this record; see the [final backend readiness report](final_backend_readiness.md). This audit is retained as dated evidence.
+
 Task: AUDIT-01 — pre-design and pre-frontend quality gate
 Audit date: 2026-11-24
 Repository: `https://github.com/MahmoudNagiubX/SmartNutri` (public by user intent)

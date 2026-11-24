@@ -21,6 +21,7 @@ class AgentContext(StrictModel):
     net_weight_g: float | None = None
     camera_quality: ImageQuality | None = None
     predictions: list[FoodPrediction] = Field(default_factory=list)
+    prediction_mask_consistent: bool = True
     portions: PortionEstimationResult | None = None
     verified_nutrition_classes: set[int] = Field(default_factory=set)
     capture_attempts_remaining: int = 0
@@ -30,6 +31,14 @@ class AgentContext(StrictModel):
 
 class NutritionDecisionAgent:
     """Transparent backend policy; this is not a separately trained AI model."""
+
+    ambiguous_foodseg_classes = {
+        9: "cheese or butter",
+        48: "chicken or duck",
+        89: "cilantro or mint",
+        94: "pepper variety",
+        103: "other ingredients",
+    }
 
     def __init__(
         self,
@@ -84,15 +93,32 @@ class NutritionDecisionAgent:
                 requires_user=True,
             )
 
-        low_confidence = [
-            item for item in context.predictions
-            if item.classification_confidence < self.min_classification_confidence
-        ]
-        if low_confidence:
-            labels = ", ".join(item.label for item in low_confidence[:4])
+        if not context.prediction_mask_consistent:
             return AgentDecision(
                 action=AgentAction.REVIEW_FOOD_PREDICTIONS,
-                rationale=f"Food class confidence is below threshold for: {labels}.",
+                rationale="Food class predictions conflict with the semantic mask; no nutrition calculation is supported.",
+                requires_user=True,
+            )
+
+        uncertain_predictions = [
+            item for item in context.predictions
+            if item.classification_confidence < self.min_classification_confidence
+            or item.segmentation_quality != "unverified"
+        ]
+        ambiguous_predictions = [
+            item for item in context.predictions
+            if item.class_id in self.ambiguous_foodseg_classes
+        ]
+        if uncertain_predictions or ambiguous_predictions:
+            labels = ", ".join(
+                dict.fromkeys(
+                    item.label
+                    for item in (uncertain_predictions + ambiguous_predictions)
+                )
+            )[:200]
+            return AgentDecision(
+                action=AgentAction.REVIEW_FOOD_PREDICTIONS,
+                rationale=f"Food identity is uncertain, low confidence, or has a small/fragmented region: {labels}.",
                 requires_user=True,
             )
 

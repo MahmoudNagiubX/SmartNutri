@@ -21,6 +21,8 @@ The full local audit decoded all 7,118 FoodSeg103 image-mask pairs and all 3,490
 - Defaults to at most 20 epochs, early-stopping patience 6, batch size 2, gradient accumulation 4, CUDA FP16 mixed precision, seed 42, and zero data-loader workers for Windows. This is a conservative starting point for a 6 GB GPU; peak VRAM has not been measured by a training run.
 - Selects the best checkpoint by validation foreground mean IoU. Evaluation reports pixel accuracy, mIoU, and Dice both with and without background, plus per-class metrics.
 
+The pipeline and training defaults above describe the retained B0 baseline scripts. The completed SegFormer-B2 checkpoint is the frozen model selected for SmartNutri inference; B0 remains available for benchmark comparisons. The normal API demo remains in mock CV mode until explicitly configured. For local B2 inference, set `SMARTNUTRI_CV_MODE=segformer`, `SMARTNUTRI_CV_MODEL=b2`, and `SMARTNUTRI_FOODSEG_ROOT` to the local FoodSeg103 directory. The backend loads local weights only. See [the final backend readiness report](docs/audit/final_backend_readiness.md), [CV evaluation](docs/cv_model_evaluation_report.md), and [API configuration](docs/api_reference.md).
+
 Preprocessing experiment profiles are in `configs/image_processing/`:
 
 - `baseline.json`: deterministic resize/pad and normalization only; this is the default.

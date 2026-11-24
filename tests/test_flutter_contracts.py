@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,6 +47,48 @@ class FlutterApiContractTests(unittest.TestCase):
                 if path == "/api/v1/nutrition/records" and method == "get":
                     schema = schema["items"]
                 self.assertEqual(schema["$ref"], f"#/components/schemas/{model_name}")
+
+    def test_openapi_v1_matches_the_checked_in_flutter_contract(self):
+        contract_path = Path(__file__).resolve().parents[1] / "docs" / "contracts" / "openapi-v1.json"
+        expected = json.loads(contract_path.read_text(encoding="utf-8"))
+        actual = self.client.get("/openapi.json").json()
+        self.assertEqual(actual, expected)
+
+    def test_frozen_contract_contains_every_required_backend_operation(self):
+        paths = self.client.get("/openapi.json").json()["paths"]
+        expected = {
+            ("/api/v1/health", "get"),
+            ("/api/v1/scale/status", "get"),
+            ("/api/v1/scale/tare-config", "get"),
+            ("/api/v1/scale/tare", "post"),
+            ("/api/v1/scale/calibrate", "post"),
+            ("/api/v1/plates", "get"), ("/api/v1/plates", "post"),
+            ("/api/v1/plates/default", "get"), ("/api/v1/plates/default", "put"),
+            ("/api/v1/camera/status", "get"),
+            ("/api/v1/scans", "get"), ("/api/v1/scans/active", "get"),
+            ("/api/v1/scans/{scan_id}", "get"),
+            ("/api/v1/scans/{scan_id}/foods", "get"),
+            ("/api/v1/scans/{scan_id}/portions", "get"),
+            ("/api/v1/scans/{scan_id}/nutrition", "get"),
+            ("/api/v1/scans/{scan_id}/mask.png", "get"),
+            ("/api/v1/scans/{scan_id}/mask/{class_id}", "get"),
+            ("/api/v1/scans/{scan_id}/capture.jpg", "get"),
+            ("/api/v1/scans/{scan_id}/annotated.jpg", "get"),
+            ("/api/v1/camera/capture/{scan_id}", "post"),
+            ("/api/v1/scans/{scan_id}/recapture", "post"),
+            ("/api/v1/scans/mock-placement", "post"),
+            ("/api/v1/nutrition/records", "get"), ("/api/v1/nutrition/records", "post"),
+            ("/api/v1/meals", "get"), ("/api/v1/meals/{meal_id}", "get"),
+            ("/api/v1/meals/{meal_id}/corrections", "post"),
+            ("/api/v1/agents/decisions/{scan_id}", "get"),
+        }
+        actual = {
+            (path, method)
+            for path, operations in paths.items()
+            for method in operations
+            if method in {"get", "post", "put", "patch", "delete"}
+        }
+        self.assertSetEqual(actual, expected)
 
     def test_active_scan_contract_is_nullable_and_scan_polling_is_http_only(self):
         schema = self.client.get("/openapi.json").json()
@@ -111,6 +154,83 @@ class FlutterApiContractTests(unittest.TestCase):
         self.assertEqual(listed.status_code, 200)
         self.assertIn(record, listed.json())
         self.assertTrue(any(item["source_identifier"] == "FDC:168878" for item in listed.json()))
+
+    def test_full_mock_scan_contract_exercises_flutter_read_paths_without_fake_nutrition(self):
+        for path in (
+            "/api/v1/health",
+            "/api/v1/scale/status",
+            "/api/v1/scale/tare-config",
+            "/api/v1/camera/status",
+            "/api/v1/plates",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).status_code, 200)
+
+        plate = self.client.post(
+            "/api/v1/plates",
+            json={"name": "Contract fixture plate", "empty_plate_weight_g": 300, "make_default": True},
+        )
+        self.assertEqual(plate.status_code, 201, plate.text)
+        self.assertEqual(self.client.get("/api/v1/plates/default").json()["id"], plate.json()["id"])
+
+        placement = self.client.post("/api/v1/scans/mock-placement", json={"gross_weight_g": 750})
+        self.assertEqual(placement.status_code, 200, placement.text)
+        payload = placement.json()
+        self.assertTrue(payload["simulated"])
+        self.assertIn("synthetic", payload["simulation_notice"])
+        scan = payload["scan"]
+        scan_id = scan["id"]
+        self.assertEqual(scan["measured_net_food_weight_g"], 450)
+        self.assertIsNone(scan["nutrition_totals"])
+        active = self.client.get("/api/v1/scans/active")
+        self.assertEqual(active.status_code, 200, active.text)
+        self.assertEqual(active.json()["id"], scan_id)
+
+        resources = {
+            f"/api/v1/scans/{scan_id}": 200,
+            f"/api/v1/scans/{scan_id}/foods": 200,
+            f"/api/v1/scans/{scan_id}/portions": 200,
+            f"/api/v1/scans/{scan_id}/nutrition": 200,
+            f"/api/v1/agents/decisions/{scan_id}": 200,
+            f"/api/v1/scans/{scan_id}/mask.png": 200,
+            f"/api/v1/scans/{scan_id}/mask/1": 200,
+            f"/api/v1/scans/{scan_id}/capture.jpg": 200,
+            f"/api/v1/scans/{scan_id}/annotated.jpg": 200,
+        }
+        for path, expected_status in resources.items():
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, expected_status, response.text[:300])
+
+        foods = self.client.get(f"/api/v1/scans/{scan_id}/foods").json()
+        self.assertTrue(foods["predictions"])
+        self.assertTrue(foods["simulated"])
+        portion_response = self.client.get(f"/api/v1/scans/{scan_id}/portions").json()
+        portions = portion_response["portions"]
+        self.assertEqual(portions["method"], "experimental_visual_area_proportion_v1")
+        self.assertTrue(portions["review_required"])
+        nutrition = self.client.get(f"/api/v1/scans/{scan_id}/nutrition").json()
+        self.assertIsNone(nutrition["totals"])
+        self.assertTrue(nutrition["simulated"])
+
+        meal = scan["meal"]
+        self.assertIsNotNone(meal)
+        self.assertEqual(self.client.get("/api/v1/scans").status_code, 200)
+        self.assertEqual(self.client.get("/api/v1/meals").status_code, 200)
+        self.assertEqual(self.client.get(f"/api/v1/meals/{meal['id']}").status_code, 200)
+        records = self.client.get("/api/v1/nutrition/records").json()
+        self.assertTrue(records)
+        self.assertTrue(all(item["source_identifier"] for item in records))
+
+        correction = self.client.post(
+            f"/api/v1/meals/{meal['id']}/corrections",
+            json={"items": [{"class_id": 1, "label": "mock-confirmed rice", "weight_g": 450}]},
+        )
+        self.assertEqual(correction.status_code, 200, correction.text)
+        self.assertEqual(correction.json()["items"][0]["estimated_weight_g"], 450)
+        self.assertIsNone(correction.json()["kcal_total"])
+        corrected_nutrition = self.client.get(f"/api/v1/scans/{scan_id}/nutrition").json()
+        self.assertIsNone(corrected_nutrition["totals"])
 
     def test_native_mobile_defaults_do_not_enable_browser_cors(self):
         self.assertEqual(Settings().cors_origins, ())

@@ -1,5 +1,7 @@
 # SmartNutri Readiness Gate
 
+Historical readiness snapshot. Its open P1 items were reassessed and partially addressed in the [final backend readiness report](final_backend_readiness.md); use that follow-up for the current status. This file is retained to preserve the original audit record.
+
 Assessment date: 2026-11-24. Ratings reflect current evidence and unresolved defects, not a roadmap promise.
 
 ## Readiness verdicts

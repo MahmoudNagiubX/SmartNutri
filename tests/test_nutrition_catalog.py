@@ -18,13 +18,17 @@ class NutritionCatalogTests(unittest.TestCase):
         self.repository.close()
         self.temp_dir.cleanup()
 
-    def test_catalog_has_eight_food_identities_and_traceable_usda_records(self):
-        self.assertEqual(len(CURATED_NUTRITION_RECORDS), 11)
-        self.assertEqual(len({item["food_identity"] for item in CURATED_NUTRITION_RECORDS}), 8)
+    def test_catalog_has_expanded_traceable_usda_candidates(self):
+        self.assertEqual(len(CURATED_NUTRITION_RECORDS), 92)
+        self.assertEqual(len({item["source_identifier"] for item in CURATED_NUTRITION_RECORDS}), 92)
         self.assertEqual(
-            {item["source_identifier"] for item in CURATED_NUTRITION_RECORDS},
+            {item["source_identifier"] for item in CURATED_NUTRITION_RECORDS[:11]},
             {f"FDC:{fdc_id}" for fdc_id in (168878, 168877, 171477, 171077, 172411, 170698, 168202, 173944, 169967, 170379, 170457)},
         )
+        candidates = CURATED_NUTRITION_RECORDS[11:]
+        self.assertEqual(len(candidates), 81)
+        self.assertGreaterEqual(len({item["class_id"] for item in candidates}), 50)
+        self.assertTrue(all(item["requires_preparation_confirmation"] for item in candidates))
         for item in CURATED_NUTRITION_RECORDS:
             with self.subTest(source_identifier=item["source_identifier"]):
                 record = NutritionRecord.model_validate(item)
@@ -37,9 +41,9 @@ class NutritionCatalogTests(unittest.TestCase):
         second_count = self.service.seed_catalog(CURATED_NUTRITION_RECORDS)
         records = self.service.list_records()
 
-        self.assertEqual(first_count, 11)
+        self.assertEqual(first_count, len(CURATED_NUTRITION_RECORDS))
         self.assertEqual(second_count, 0)
-        self.assertEqual(len(records), 11)
+        self.assertEqual(len(records), len(CURATED_NUTRITION_RECORDS))
         self.assertEqual({item["source_identifier"] for item in records}, {
             item["source_identifier"] for item in CURATED_NUTRITION_RECORDS
         })
@@ -67,7 +71,8 @@ class NutritionCatalogTests(unittest.TestCase):
             )
             for item in CURATED_NUTRITION_RECORDS
         }
-        self.assertEqual(actual, expected)
+        for source_identifier, expected_values in expected.items():
+            self.assertEqual(actual[source_identifier], expected_values)
 
     def test_verified_multi_food_totals_match_independent_per_100g_calculation(self):
         self.service.seed_catalog(CURATED_NUTRITION_RECORDS)
@@ -118,18 +123,25 @@ class NutritionCatalogTests(unittest.TestCase):
     def test_ambiguous_food_and_preparation_classes_require_explicit_selection(self):
         self.service.seed_catalog(CURATED_NUTRITION_RECORDS)
 
-        for class_id in (25, 29, 48, 66, 73, 87):
+        for class_id in (3, 24, 25, 29, 48, 66, 69, 73, 87, 89, 94):
             with self.subTest(class_id=class_id):
                 self.assertIsNone(self.service.lookup_for_class(class_id))
 
-        fries = self.service.lookup_for_class(3)
-        self.assertIsNotNone(fries)
-        self.assertEqual(fries[1].source_identifier, "FDC:170698")
+        self.assertIsNone(self.service.lookup_for_class(3))
 
         rice = next(item for item in self.service.list_records(class_id=66) if item["source_identifier"] == "FDC:168878")
         selected = self.service.lookup_for_class(66, nutrition_record_id=rice["id"])
         self.assertIsNotNone(selected)
         self.assertEqual(selected[1].preparation_state, "cooked; long-grain, regular, enriched")
+
+    def test_explicit_candidate_selection_is_required_for_ambiguous_classes(self):
+        self.service.seed_catalog(CURATED_NUTRITION_RECORDS)
+        self.assertIsNone(self.service.lookup_for_class(94))
+        pepper = next(item for item in self.service.list_records(class_id=94) if item["source_identifier"] == "FDC:170427")
+        selected = self.service.lookup_for_class(94, nutrition_record_id=pepper["id"])
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected[1].source_identifier, "FDC:170427")
+        self.assertTrue(selected[1].requires_preparation_confirmation)
 
     def test_chicken_duck_class_requires_explicit_species_and_source_record(self):
         self.service.seed_catalog(CURATED_NUTRITION_RECORDS)
@@ -208,7 +220,19 @@ class NutritionCatalogTests(unittest.TestCase):
         real_result = self.service.calculate([mock_portion.model_copy(update={"simulated": False})], simulated=False)
 
         self.assertEqual(simulated_result.items[0].source_identifier, "test-fixture:mock-fries")
-        self.assertEqual(real_result.items[0].source_identifier, "FDC:170698")
+        self.assertIsNone(real_result.items[0].nutrients)
+        self.assertEqual(real_result.items[0].mapping_status, "missing_or_ambiguous_verified_record")
+
+        fries_record = next(
+            item for item in self.service.list_records(class_id=3)
+            if item["source_identifier"] == "FDC:170698"
+        )
+        explicitly_confirmed = self.service.calculate(
+            [mock_portion.model_copy(update={"simulated": False})],
+            simulated=False,
+            nutrition_record_ids={3: fries_record["id"]},
+        )
+        self.assertEqual(explicitly_confirmed.items[0].source_identifier, "FDC:170698")
 
 
 if __name__ == "__main__":

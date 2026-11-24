@@ -111,6 +111,32 @@ class NutritionDecisionAgentTests(unittest.TestCase):
         context = self.base.model_copy(update={"predictions": [food(0.4)]})
         self.assertEqual(self.agent.decide(context).action, AgentAction.REVIEW_FOOD_PREDICTIONS)
 
+    def test_ambiguous_foodseg_class_requests_identity_confirmation(self):
+        ambiguous = FoodPrediction(
+            class_id=48,
+            label="chicken duck",
+            classification_confidence=0.95,
+            pixel_area=500,
+            region_count=1,
+            source="mock",
+            simulated=True,
+        )
+        decision = self.agent.decide(self.base.model_copy(update={"predictions": [ambiguous]}))
+        self.assertEqual(decision.action, AgentAction.REVIEW_FOOD_PREDICTIONS)
+        self.assertIn("chicken duck", decision.rationale)
+
+    def test_small_or_fragmented_regions_request_food_review(self):
+        tiny = food().model_copy(update={"segmentation_quality": "small_region"})
+        decision = self.agent.decide(self.base.model_copy(update={"predictions": [tiny]}))
+        self.assertEqual(decision.action, AgentAction.REVIEW_FOOD_PREDICTIONS)
+
+    def test_prediction_mask_conflict_blocks_analysis(self):
+        decision = self.agent.decide(
+            self.base.model_copy(update={"prediction_mask_consistent": False})
+        )
+        self.assertEqual(decision.action, AgentAction.REVIEW_FOOD_PREDICTIONS)
+        self.assertIn("conflict", decision.rationale)
+
     def test_missing_nutrition_mapping_requests_preparation_or_mapping(self):
         context = self.base.model_copy(update={"verified_nutrition_classes": set()})
         self.assertEqual(self.agent.decide(context).action, AgentAction.REQUEST_FOOD_PREPARATION)

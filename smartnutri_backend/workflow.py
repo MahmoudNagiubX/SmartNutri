@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import io
+import math
 import json
 import os
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from PIL import Image
@@ -36,7 +38,11 @@ class ScanWorkflow:
         agent: NutritionDecisionAgent,
         nutrition: NutritionService,
         image_dir: str | Path,
+        min_region_area_ratio: float = 0.001,
+        placement_validator: Callable[[str, ScaleObservation], Awaitable[str | None]] | None = None,
     ) -> None:
+        if not math.isfinite(min_region_area_ratio) or not 0 <= min_region_area_ratio <= 1:
+            raise ValueError("min_region_area_ratio must be finite and in [0, 1]")
         self.repository = repository
         self.camera = camera
         self.inference = inference
@@ -44,6 +50,8 @@ class ScanWorkflow:
         self.agent = agent
         self.nutrition = nutrition
         self.image_dir = Path(image_dir)
+        self.min_region_area_ratio = min_region_area_ratio
+        self.placement_validator = placement_validator
         self._cancelled: dict[str, asyncio.Event] = {}
         self._busy: set[str] = set()
 
@@ -143,6 +151,9 @@ class ScanWorkflow:
 
         if cancelled.is_set():
             return self._mark_removed(scan_id)
+        placement_issue = await self._placement_issue(scan_id, observation)
+        if placement_issue:
+            return self._mark_placement_review(scan_id, placement_issue, capture.quality.model_dump(mode="json"))
         capture_path = self._store(scan_id, "capture.jpg", capture.image_bytes)
         self.repository.update_scan(
             scan_id,
@@ -178,25 +189,79 @@ class ScanWorkflow:
         if cancelled.is_set():
             return self._mark_removed(scan_id)
 
+        placement_issue = await self._placement_issue(scan_id, observation)
+        if placement_issue:
+            return self._mark_placement_review(
+                scan_id,
+                placement_issue,
+                capture.quality.model_dump(mode="json"),
+                capture_path=str(capture_path),
+            )
+
         self._store(scan_id, "mask.png", segmentation.semantic_mask_png)
         annotated_path = self._store(scan_id, "annotated.jpg", segmentation.annotated_image_bytes)
         predictions = [item.model_dump(mode="json") for item in segmentation.predictions]
         with Image.open(io.BytesIO(segmentation.semantic_mask_png)) as mask_image:
-            low_confidence_predictions = [
+            semantic_mask = mask_image.convert("L")
+            histogram = semantic_mask.histogram()
+            mask_classes = {
+                class_id for class_id in range(1, 104) if histogram[class_id] > 0
+            }
+            prediction_classes = [item.class_id for item in segmentation.predictions]
+            mask_consistent = (
+                len(prediction_classes) == len(set(prediction_classes))
+                and set(prediction_classes) == mask_classes
+                and all(
+                    histogram[item.class_id] == item.pixel_area
+                    for item in segmentation.predictions
+                )
+                and not any(histogram[class_id] for class_id in range(104, 255))
+            )
+            if not mask_consistent:
+                decision = self.agent.decide(
+                    AgentContext(
+                        scale=observation,
+                        plate_tare_known=True,
+                        net_weight_g=net_weight_g,
+                        camera_quality=capture.quality,
+                        predictions=segmentation.predictions,
+                        prediction_mask_consistent=False,
+                    )
+                )
+                return self._mark_review(
+                    scan_id,
+                    decision,
+                    result_message=decision.rationale,
+                    error_code="prediction_mask_mismatch",
+                    image_quality=capture.quality.model_dump(mode="json"),
+                    predictions=predictions,
+                    capture_path=str(capture_path),
+                    annotated_path=str(annotated_path),
+                )
+
+            minimum_region_pixels = max(
+                1,
+                math.ceil(segmentation.width * segmentation.height * self.min_region_area_ratio),
+            )
+            uncertain_predictions = [
                 item
                 for item in segmentation.predictions
                 if item.classification_confidence < self.agent.min_classification_confidence
+                or item.pixel_area < minimum_region_pixels
+                or item.segmentation_quality != "unverified"
             ]
             usable_predictions = [
                 item
                 for item in segmentation.predictions
                 if item.classification_confidence >= self.agent.min_classification_confidence
+                and item.pixel_area >= minimum_region_pixels
+                and item.segmentation_quality == "unverified"
             ]
             portions = self.portion_estimator.estimate(
                 net_weight_g,
                 usable_predictions,
-                semantic_mask=mask_image.convert("L"),
-                unidentified_area_px=sum(item.pixel_area for item in low_confidence_predictions),
+                semantic_mask=semantic_mask,
+                unidentified_area_px=sum(item.pixel_area for item in uncertain_predictions),
                 simulated=observation.simulated or capture.simulated or segmentation.simulated,
             )
         nutrition_calculation: NutritionCalculation = self.nutrition.calculate(
@@ -215,6 +280,7 @@ class ScanWorkflow:
             net_weight_g=net_weight_g,
             camera_quality=capture.quality,
             predictions=segmentation.predictions,
+            prediction_mask_consistent=mask_consistent,
             portions=portions,
             verified_nutrition_classes=verified_classes,
             capture_attempts_remaining=0,
@@ -292,6 +358,40 @@ class ScanWorkflow:
             error_code="plate_tare_required",
         )
 
+    async def _placement_issue(
+        self,
+        scan_id: str,
+        observation: ScaleObservation,
+    ) -> str | None:
+        if self.placement_validator is None:
+            return None
+        scan = self.repository.get_scan(scan_id)
+        if scan is None:
+            return "The scan record disappeared while the image was being processed."
+        return await self.placement_validator(scan["placement_key"], observation)
+
+    def _mark_placement_review(
+        self,
+        scan_id: str,
+        message: str,
+        image_quality: dict[str, Any],
+        *,
+        capture_path: str | None = None,
+    ) -> dict[str, Any]:
+        return self._mark_review(
+            scan_id,
+            AgentDecision(
+                action=AgentAction.RETRY_WEIGHT,
+                rationale=message,
+                requires_user=True,
+                retryable=True,
+            ),
+            result_message=message,
+            error_code="placement_changed_or_unstable",
+            image_quality=image_quality,
+            capture_path=capture_path,
+        )
+
     def _mark_review(
         self,
         scan_id: str,
@@ -300,14 +400,26 @@ class ScanWorkflow:
         result_message: str,
         error_code: str,
         image_quality: dict[str, Any] | None = None,
+        predictions: list[dict[str, Any]] | None = None,
+        capture_path: str | None = None,
+        annotated_path: str | None = None,
     ) -> dict[str, Any]:
+        updates: dict[str, Any] = {
+            "state": ScanState.NEEDS_REVIEW.value,
+            "decision": decision.action.value,
+            "result_message": result_message[:500],
+            "error_code": error_code,
+            "image_quality": image_quality,
+        }
+        if predictions is not None:
+            updates["predictions"] = predictions
+        if capture_path is not None:
+            updates["capture_path"] = capture_path
+        if annotated_path is not None:
+            updates["annotated_path"] = annotated_path
         result = self.repository.update_scan(
             scan_id,
-            state=ScanState.NEEDS_REVIEW.value,
-            decision=decision.action.value,
-            result_message=result_message[:500],
-            error_code=error_code,
-            image_quality=image_quality,
+            **updates,
         )
         result["agent_decision"] = decision.model_dump(mode="json")
         return result

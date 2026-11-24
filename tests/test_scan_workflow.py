@@ -1,9 +1,12 @@
 import asyncio
+import io
 import threading
 import tempfile
 import time
 import unittest
 from pathlib import Path
+
+from PIL import Image, ImageDraw
 
 from smartnutri_backend.agent import NutritionDecisionAgent
 from smartnutri_backend.camera import MockCameraService
@@ -11,9 +14,9 @@ from smartnutri_backend.nutrition import NutritionService
 from smartnutri_backend.portion import ExperimentalVisualProportionEstimator
 from smartnutri_backend.repository import SQLiteRepository
 from smartnutri_backend.scale_service import MockScaleClient, ScaleMonitoringService
-from smartnutri_backend.schemas import ScanState
+from smartnutri_backend.schemas import FoodPrediction, ScaleObservation, ScanState
 from smartnutri_backend.settings import Settings
-from smartnutri_backend.vision import MockSegmentationService
+from smartnutri_backend.vision import MockSegmentationService, SegmentationResult
 from smartnutri_backend.workflow import ScanWorkflow
 
 
@@ -27,6 +30,52 @@ class BlockingCamera(MockCameraService):
         self.capture_started.set()
         self.release_capture.wait(timeout=2)
         return super().capture_raw()
+
+
+class FixtureSegmentation:
+    def __init__(self, *, inconsistent_area=False):
+        self.inconsistent_area = inconsistent_area
+
+    def infer(self, capture, *, scan_id):
+        with Image.open(io.BytesIO(capture.image_bytes)) as source:
+            original = source.convert("RGB")
+        semantic = Image.new("L", original.size, 0)
+        draw = ImageDraw.Draw(semantic)
+        draw.rectangle((20, 20, 119, 69), fill=1)
+        draw.rectangle((200, 200, 201, 201), fill=48)
+        histogram = semantic.histogram()
+        predictions = [
+            FoodPrediction(
+                class_id=1,
+                label="rice",
+                classification_confidence=0.92,
+                pixel_area=histogram[1] - int(self.inconsistent_area),
+                region_count=1,
+                source="mock",
+                simulated=True,
+            ),
+            FoodPrediction(
+                class_id=48,
+                label="chicken duck",
+                classification_confidence=0.92,
+                pixel_area=histogram[48],
+                region_count=1,
+                segmentation_quality="small_region",
+                source="mock",
+                simulated=True,
+            ),
+        ]
+        output = io.BytesIO()
+        semantic.save(output, format="PNG")
+        return SegmentationResult(
+            predictions=predictions,
+            semantic_mask_png=output.getvalue(),
+            annotated_image_bytes=capture.image_bytes,
+            width=original.width,
+            height=original.height,
+            source="mock",
+            simulated=True,
+        )
 
 
 class ScanWorkflowTests(unittest.IsolatedAsyncioTestCase):
@@ -87,6 +136,100 @@ class ScanWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scan["state"], ScanState.NEEDS_REVIEW.value)
         self.assertEqual(scan["error_code"], "plate_removed_during_scan")
         self.assertIsNone(scan["capture_path"])
+        self.assertIsNone(self.repository.get_meal_by_scan(scan["id"]))
+
+    async def test_changed_scale_weight_after_inference_aborts_the_scan(self):
+        class ChangeWeightDuringInference:
+            def __init__(self, scale):
+                self.scale = scale
+
+            def infer(self, image, *, scan_id):
+                self.scale.set_weight(780)
+                return MockSegmentationService().infer(image, scan_id=scan_id)
+
+        self.workflow.inference = ChangeWeightDuringInference(self.scale)
+        observation = self.scale.set_weight(750)
+        start = time.monotonic()
+        await self.service.observe(observation, now=start)
+        await self.service.observe(observation, now=start + 0.05)
+        event = await self.service.observe(observation, now=start + 0.1)
+        self.camera.release_capture.set()
+        await asyncio.gather(*tuple(self.service._scan_tasks), return_exceptions=True)
+
+        scan = self.repository.get_scan_by_placement(event.placement_key)
+        self.assertEqual(scan["state"], ScanState.NEEDS_REVIEW.value)
+        self.assertEqual(scan["error_code"], "placement_changed_or_unstable")
+        self.assertIsNone(self.repository.get_meal_by_scan(scan["id"]))
+
+    async def test_placement_revalidation_rejects_unstable_and_changed_readings(self):
+        original = self.scale.set_weight(750)
+        placement_key = "fixture-placement"
+        scan = self.repository.begin_scan_for_placement(
+            placement_key=placement_key,
+            source="mock",
+            simulated=True,
+            state=ScanState.CAPTURING.value,
+        )
+        self.service.monitor.active_placement_key = placement_key
+
+        self.assertIsNone(await self.service.validate_active_placement(placement_key, original))
+        self.scale.set_weight(760)
+        changed = await self.service.validate_active_placement(placement_key, original)
+        self.assertIn("weight changed", changed)
+
+        class UnstableScale:
+            def get_weight(self):
+                return ScaleObservation(
+                    ok=False,
+                    source="mock",
+                    simulated=True,
+                    sensor_connected=False,
+                    tared=True,
+                    calibrated=True,
+                    stable=False,
+                    status="unstable",
+                    unit="g",
+                    weight_g=750,
+                )
+
+        self.service.client = UnstableScale()
+        unstable = await self.service.validate_active_placement(placement_key, original)
+        self.assertIn("stale or unstable", unstable)
+        self.assertEqual(scan["placement_key"], placement_key)
+
+    async def test_minimum_region_filter_withholds_small_food_and_requests_review(self):
+        self.workflow.inference = FixtureSegmentation()
+        self.workflow.min_region_area_ratio = 0.01
+        observation = self.scale.set_weight(750)
+        start = time.monotonic()
+        await self.service.observe(observation, now=start)
+        await self.service.observe(observation, now=start + 0.05)
+        event = await self.service.observe(observation, now=start + 0.1)
+        self.camera.release_capture.set()
+        await asyncio.gather(*tuple(self.service._scan_tasks), return_exceptions=True)
+
+        scan = self.repository.get_scan_by_placement(event.placement_key)
+        self.assertEqual(scan["decision"], "REVIEW_FOOD_PREDICTIONS")
+        portions = scan["portions"]
+        self.assertEqual([item["class_id"] for item in portions["estimates"]], [1])
+        self.assertFalse(portions["allocation_complete"])
+        self.assertGreater(portions["unallocated_weight_g"], 0)
+
+    async def test_prediction_mask_conflict_blocks_portion_and_nutrition_outputs(self):
+        self.workflow.inference = FixtureSegmentation(inconsistent_area=True)
+        observation = self.scale.set_weight(750)
+        start = time.monotonic()
+        await self.service.observe(observation, now=start)
+        await self.service.observe(observation, now=start + 0.05)
+        event = await self.service.observe(observation, now=start + 0.1)
+        self.camera.release_capture.set()
+        await asyncio.gather(*tuple(self.service._scan_tasks), return_exceptions=True)
+
+        scan = self.repository.get_scan_by_placement(event.placement_key)
+        self.assertEqual(scan["error_code"], "prediction_mask_mismatch")
+        self.assertEqual(scan["decision"], "REVIEW_FOOD_PREDICTIONS")
+        self.assertIsNone(scan["portions"])
+        self.assertIsNone(scan["nutrition_totals"])
         self.assertIsNone(self.repository.get_meal_by_scan(scan["id"]))
 
 
