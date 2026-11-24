@@ -404,7 +404,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="scan not found")
         predictions = scan.get("predictions") or []
         source = predictions[0]["source"] if predictions else active.settings.segmentation_mode
-        simulated = source == "mock" or any(item.get("simulated") for item in predictions)
+        simulated = bool(
+            scan.get("simulated")
+            or scan.get("capture_simulated")
+            or source == "mock"
+            or any(item.get("simulated") for item in predictions)
+        )
         return {
             "scan_id": scan_id,
             "predictions": predictions,

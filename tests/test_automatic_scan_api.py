@@ -224,6 +224,46 @@ class AutomaticScanApiTests(unittest.TestCase):
         self.assertIsNone(scan["nutrition_totals"])
         self.assertFalse(scan["meal"]["state"] == "saved")
 
+    def test_foods_contract_preserves_simulated_capture_provenance_with_real_model_output(self):
+        self.client.post(
+            "/api/v1/plates",
+            json={"name": "test plate", "empty_plate_weight_g": 300, "make_default": True},
+        )
+        runtime = self.client.app.state.runtime
+        mock_inference = runtime.workflow.inference
+
+        class RealModelOutputFromSyntheticInput:
+            def infer(self, image, *, scan_id):
+                result = mock_inference.infer(image, scan_id=scan_id)
+                predictions = [
+                    item.model_copy(update={"source": "segformer", "simulated": False})
+                    for item in result.predictions
+                ]
+                return SegmentationResult(
+                    predictions=predictions,
+                    semantic_mask_png=result.semantic_mask_png,
+                    annotated_image_bytes=result.annotated_image_bytes,
+                    width=result.width,
+                    height=result.height,
+                    source="segformer",
+                    simulated=False,
+                )
+
+        runtime.workflow.inference = RealModelOutputFromSyntheticInput()
+        scan_response = self.client.post(
+            "/api/v1/scans/mock-placement", json={"gross_weight_g": 750}
+        )
+        self.assertEqual(scan_response.status_code, 200, scan_response.text)
+        scan = scan_response.json()["scan"]
+        self.assertTrue(scan["capture_simulated"])
+        self.assertTrue(scan["simulated"])
+
+        foods = self.client.get(f"/api/v1/scans/{scan['id']}/foods")
+        self.assertEqual(foods.status_code, 200, foods.text)
+        self.assertEqual(foods.json()["source"], "segformer")
+        self.assertTrue(foods.json()["simulated"])
+        self.assertTrue(all(not item["simulated"] for item in foods.json()["predictions"]))
+
     def test_unidentified_food_mass_suppresses_partial_meal_nutrition_totals(self):
         self.client.post(
             "/api/v1/plates",
