@@ -84,6 +84,14 @@ __pycache__/
 .ruff_cache/
 .ipynb_checkpoints/
 
+# SmartNutri backend runtime data (database, captures, masks, annotations)
+smartnutri_data/
+backend_data/
+runtime_data/
+*.sqlite3
+*.sqlite3-*
+smartnutri_backend/images/
+
 # Python environments
 .venv/
 venv/

@@ -21,6 +21,8 @@ The full local audit decoded all 7,118 FoodSeg103 image-mask pairs and all 3,490
 - Defaults to at most 20 epochs, early-stopping patience 6, batch size 2, gradient accumulation 4, CUDA FP16 mixed precision, seed 42, and zero data-loader workers for Windows. This is a conservative starting point for a 6 GB GPU; peak VRAM has not been measured by a training run.
 - Selects the best checkpoint by validation foreground mean IoU. Evaluation reports pixel accuracy, mIoU, and Dice both with and without background, plus per-class metrics.
 
+The pipeline and training defaults above describe the retained B0 baseline scripts. The completed SegFormer-B2 checkpoint is the frozen model selected for SmartNutri inference; B0 remains available for benchmark comparisons. The normal API demo remains in mock CV mode until explicitly configured. For local B2 inference, set `SMARTNUTRI_CV_MODE=segformer`, `SMARTNUTRI_CV_MODEL=b2`, and `SMARTNUTRI_FOODSEG_ROOT` to the local FoodSeg103 directory. The backend loads local weights only. See [the final backend readiness report](docs/audit/final_backend_readiness.md), [CV evaluation](docs/cv_model_evaluation_report.md), and [API configuration](docs/api_reference.md).
+
 Preprocessing experiment profiles are in `configs/image_processing/`:
 
 - `baseline.json`: deterministic resize/pad and normalization only; this is the default.
@@ -76,9 +78,24 @@ The default evaluates the official validation split. It writes `metrics.json` an
 
 This saves side-by-side source image, ground-truth overlay, and prediction overlay PNGs under the checkpoint's `visualizations` folder.
 
-## ESP32 scale and future nutrition agent
+## Automatic multi-food backend
 
-The independent ESP32/HX711 scale module and Python client are documented in [docs/weight_scale.md](docs/weight_scale.md). The proposed handoff from FoodSeg103 predictions and stable real scale readings to a future laptop-side nutrition agent is documented in [docs/integration_contracts.md](docs/integration_contracts.md). The FastAPI service, model-serving endpoint, nutrition database, meal state, and AI agent are not implemented in this repository yet.
+The laptop-side BE-01 backend now provides a versioned FastAPI API, background scale monitor, saved-plate and explicit live-plate tare modes, phone/file/mock camera adapters, local-only SegFormer inference, an experimental portion estimator, a transparent nutrition decision policy, verified-record nutrition calculations, and SQLite meal history/corrections. The API and runtime are independent of the existing training process. No frontend, production nutrition dataset, or validated portion-weight model is included.
+
+Read the implementation notes in [backend architecture](docs/backend_architecture.md), [automatic scan flow](docs/automatic_scan_flow.md), [portion estimation](docs/portion_estimation.md), [agent policy](docs/ai_agent.md), [API reference](docs/api_reference.md), and the [Flutter Android integration contract](docs/flutter_android_integration.md). BE-02 prepares typed REST/OpenAPI integration contracts only; the Flutter app is not implemented here. These whole-plate contracts supersede the earlier sequential-addition proposal in [integration_contracts.md](docs/integration_contracts.md). The independent ESP32 module remains documented in [weight_scale.md](docs/weight_scale.md).
+
+Install the backend into a separate Python environment so the CUDA training environment is not changed. From PowerShell:
+
+```powershell
+$backendEnv = Join-Path $env:LOCALAPPDATA 'SmartNutriBackendVenv'
+python -m venv $backendEnv
+& (Join-Path $backendEnv 'Scripts\python.exe') -m pip install -r .\smartnutri_backend\requirements.txt
+$env:SMARTNUTRI_SCALE_MODE = 'mock'
+$env:SMARTNUTRI_AUTO_SCAN = 'false'
+& (Join-Path $backendEnv 'Scripts\python.exe') -m smartnutri_backend.server
+```
+
+The mock scan endpoint accepts only synthetic test values and labels its responses. Real scale control requires `SMARTNUTRI_CONTROL_TOKEN`; set it outside Git. The launcher defaults to loopback, CORS is disabled unless explicit browser origins are configured, and the backend uses a mock camera/CV adapter with auto-scan disabled. For Flutter over trusted Wi-Fi, bind to the laptop's exact private IPv4 address and scope the Windows Private-profile firewall to the phone or home subnet; the launcher rejects wildcard and public binds. Use local checkpoint metadata and `SMARTNUTRI_CV_MODE=segformer` for real inference; model loading is lazy and local-only. See the Flutter Android integration guide for polling, camera-service boundaries, and Android network permissions.
 
 To regenerate the actual-source preprocessing figure without a model or training:
 

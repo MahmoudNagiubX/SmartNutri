@@ -283,6 +283,35 @@ class ImageProcessingTests(unittest.TestCase):
         self.assertEqual(args.seed, 42)
         self.assertFalse(args.no_amp)
 
+    def test_segformer_foodseg_override_avoids_ade_label_count_warning(self) -> None:
+        from transformers import SegformerConfig
+
+        foodseg_id2label = {0: "background", **{i: f"food_{i}" for i in range(1, 104)}}
+        foodseg_label2id = {name: class_id for class_id, name in foodseg_id2label.items()}
+        ade_id2label = {i: f"ade_{i}" for i in range(150)}
+        ade_label2id = {name: class_id for class_id, name in ade_id2label.items()}
+        ade_config = SegformerConfig(id2label=ade_id2label, label2id=ade_label2id)
+
+        with self.assertLogs("transformers.configuration_utils", level="WARNING") as logs:
+            SegformerConfig.from_dict(
+                ade_config.to_dict(),
+                num_labels=104,
+                id2label=foodseg_id2label,
+                label2id=foodseg_label2id,
+            )
+        self.assertTrue(any("incompatible" in record.getMessage() for record in logs.records))
+
+        with self.assertNoLogs("transformers.configuration_utils", level="WARNING"):
+            foodseg_config = SegformerConfig.from_dict(
+                ade_config.to_dict(),
+                id2label=foodseg_id2label,
+                label2id=foodseg_label2id,
+            )
+
+        self.assertEqual(foodseg_config.num_labels, 104)
+        self.assertEqual(foodseg_config.id2label, foodseg_id2label)
+        self.assertEqual(foodseg_config.label2id, foodseg_label2id)
+
     def test_existing_training_evaluation_and_metrics_modules_import_without_training(self) -> None:
         import evaluate  # noqa: F401
         import metrics  # noqa: F401

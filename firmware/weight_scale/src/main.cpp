@@ -19,6 +19,9 @@
 #ifndef SMARTNUTRI_WIFI_PASSWORD
 #define SMARTNUTRI_WIFI_PASSWORD ""
 #endif
+#ifndef SMARTNUTRI_SCALE_CONTROL_TOKEN
+#define SMARTNUTRI_SCALE_CONTROL_TOKEN ""
+#endif
 #ifndef SMARTNUTRI_STABILITY_WINDOW
 #define SMARTNUTRI_STABILITY_WINDOW 10
 #endif
@@ -391,14 +394,47 @@ void handleWeight() {
   server.send(200, "application/json", weightJson());
 }
 
+bool requireControlToken() {
+  const String expected = SMARTNUTRI_SCALE_CONTROL_TOKEN;
+  if (expected.length() < 32) {
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"scale_control_token_not_configured\"}");
+    return false;
+  }
+  const char* headerName = "X-SmartNutri-Control-Token";
+  if (!server.hasHeader(headerName)) {
+    server.send(403, "application/json", "{\"ok\":false,\"error\":\"control_token_required\"}");
+    return false;
+  }
+  const String supplied = server.header(headerName);
+  if (supplied.length() != expected.length()) {
+    server.send(403, "application/json", "{\"ok\":false,\"error\":\"control_token_invalid\"}");
+    return false;
+  }
+  uint8_t mismatch = 0;
+  for (size_t index = 0; index < expected.length(); ++index) {
+    mismatch |= static_cast<uint8_t>(expected[index] ^ supplied[index]);
+  }
+  if (mismatch != 0) {
+    server.send(403, "application/json", "{\"ok\":false,\"error\":\"control_token_invalid\"}");
+    return false;
+  }
+  return true;
+}
+
 void handleTare() {
-  Serial.println(F("HTTP tare requested; remove all load before confirming externally."));
+  if (!requireControlToken()) return;
+  if (!server.hasArg("confirm") || server.arg("confirm") != "TARE") {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"explicit_TARE_confirmation_required\"}");
+    return;
+  }
+  Serial.println(F("Authenticated HTTP tare requested with explicit TARE confirmation."));
   const bool started = startTare();
   const int code = started ? 202 : (activeOperation != OperationType::None ? 409 : 503);
   server.send(code, "application/json", weightJson());
 }
 
 void handleCalibration() {
+  if (!requireControlToken()) return;
   if (!server.hasArg("known_weight_g") || !server.hasArg("confirm")) {
     server.send(400, "application/json", "{\"ok\":false,\"error\":\"known_weight_g_and_confirm_required\"}");
     return;
@@ -417,6 +453,8 @@ void handleNotFound() {
 
 void startHttpServer() {
   if (!httpRoutesConfigured) {
+    const char* headerKeys[] = {"X-SmartNutri-Control-Token"};
+    server.collectHeaders(headerKeys, 1);
     server.on("/weight", HTTP_GET, handleWeight);
     server.on("/tare", HTTP_POST, handleTare);
     server.on("/calibrate", HTTP_POST, handleCalibration);
@@ -455,8 +493,8 @@ void serviceWifi() {
 }
 
 void printHelp() {
-  Serial.println(F("Commands: status | tare | calibrate <known_weight_g> CONFIRM | help"));
-  Serial.println(F("Calibration requires a known physical mass and the exact CONFIRM token."));
+  Serial.println(F("Commands: status | tare CONFIRM | calibrate <known_weight_g> CONFIRM | help"));
+  Serial.println(F("Tare/calibration require the exact confirmation token; HTTP controls also require a secret header."));
 }
 
 void handleSerialCommand(String command) {
@@ -466,9 +504,11 @@ void handleSerialCommand(String command) {
     printHelp();
   } else if (command == "status") {
     Serial.println(weightJson());
-  } else if (command == "tare") {
+  } else if (command == "tare CONFIRM") {
     startTare();
     Serial.println(weightJson());
+  } else if (command == "tare") {
+    Serial.println(F("Tare refused. Enter: tare CONFIRM"));
   } else if (command.startsWith("calibrate ")) {
     const String args = command.substring(10);
     const int separator = args.indexOf(' ');
