@@ -2,7 +2,7 @@
 
 ## Provenance and use
 
-The backend seeds a small, fixed catalog from USDA FoodData Central Standard Reference (SR) Legacy. USDA identifies SR Legacy as its final release from April 2018; each row stores the FDC identifier and the catalog version so a reviewer can open the original record. See the [FDC API guide](https://fdc.nal.usda.gov/api-guide/), [FDC data type documentation](https://fdc.nal.usda.gov/data-documentation/), and [download/version history](https://fdc.nal.usda.gov/download-datasets/). The API requires a data.gov key; SmartNutri does not call it at runtime or store an API key.
+The backend seeds a small, fixed catalog from USDA FoodData Central Standard Reference (SR) Legacy. USDA identifies SR Legacy as its final release from April 2018; each row stores the FDC identifier and the catalog version so a reviewer can open the original record. The audit cross-checked every seeded food description and the energy, protein, carbohydrate, and fat entries against the official downloadable SR Legacy CSV archive (`food.csv`, `food_nutrient.csv`, `nutrient.csv`, and `food_portion.csv`) on 2026-11-24. See the [FDC API guide](https://fdc.nal.usda.gov/api-guide/), [FDC data type documentation](https://fdc.nal.usda.gov/data-documentation/), and [download/version history](https://fdc.nal.usda.gov/download-datasets/). The API requires a data.gov key; SmartNutri does not call it at runtime or store an API key.
 
 All nutrition values below are per 100 g: energy in kcal and protein, carbohydrate, and fat in grams. No values are inferred from FoodSeg103. FDC identifiers are source identifiers, not SmartNutri IDs. FoodSeg103 IDs below are class associations only; the segmentation label does not establish cooking state, exact cut, recipe, oil, or ingredients.
 
@@ -12,9 +12,9 @@ All nutrition values below are per 100 g: energy in kcal and protein, carbohydra
 | White long-grain regular enriched rice | Raw | 66 rice | 365 | 7.13 | 79.95 | 0.66 | [FDC 168877](https://fdc.nal.usda.gov/food-details/168877/nutrients) |
 | Chicken breast, meat only | Roasted, cooked | 48 chicken duck | 165 | 31.02 | 0 | 3.57 | [FDC 171477](https://fdc.nal.usda.gov/food-details/171477/nutrients) |
 | Chicken breast, meat only | Raw, skinless/boneless | 48 chicken duck | 120 | 22.50 | 0 | 2.62 | [FDC 171077](https://fdc.nal.usda.gov/food-details/171077/nutrients) |
-| Domesticated duck, meat only | Roasted, cooked | 48 chicken duck | 201 | 23.50 | 0 | 11.20 | [FDC 172411](https://fdc.nal.usda.gov/food-details/172411/nutrients) |
+| Domesticated duck, meat only | Roasted, cooked | 48 chicken duck | 201 | 23.48 | 0 | 11.20 | [FDC 172411](https://fdc.nal.usda.gov/food-details/172411/nutrients) |
 | Fast-food potato, French fried in vegetable oil | French-fried reference | 3 french fries | 312 | 3.43 | 41.44 | 14.73 | [FDC 170698](https://fdc.nal.usda.gov/food-details/170698/nutrients) |
-| Golden Delicious apple with skin | Raw | 25 apple | 57 | 0.28 | 13.61 | 0.15 | [FDC 168202](https://fdc.nal.usda.gov/food-details/168202/nutrients) |
+| Golden Delicious apple with skin | Raw | 25 apple | 57 | 0.28 | 13.60 | 0.15 | [FDC 168202](https://fdc.nal.usda.gov/food-details/168202/nutrients) |
 | Banana | Raw | 29 banana | 89 | 1.09 | 22.84 | 0.33 | [FDC 173944](https://fdc.nal.usda.gov/food-details/173944/nutrients) |
 | Broccoli | Boiled, drained, without salt | 87 broccoli | 35 | 2.38 | 7.18 | 0.41 | [FDC 169967](https://fdc.nal.usda.gov/food-details/169967/nutrients) |
 | Broccoli | Raw | 87 broccoli | 34 | 2.82 | 6.64 | 0.37 | [FDC 170379](https://fdc.nal.usda.gov/food-details/170379/nutrients) |

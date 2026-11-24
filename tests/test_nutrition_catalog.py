@@ -50,9 +50,9 @@ class NutritionCatalogTests(unittest.TestCase):
             "FDC:168877": (365.0, 7.13, 79.95, 0.66),
             "FDC:171477": (165.0, 31.02, 0.0, 3.57),
             "FDC:171077": (120.0, 22.5, 0.0, 2.62),
-            "FDC:172411": (201.0, 23.5, 0.0, 11.2),
+            "FDC:172411": (201.0, 23.48, 0.0, 11.2),
             "FDC:170698": (312.0, 3.43, 41.44, 14.73),
-            "FDC:168202": (57.0, 0.28, 13.61, 0.15),
+            "FDC:168202": (57.0, 0.28, 13.6, 0.15),
             "FDC:173944": (89.0, 1.09, 22.84, 0.33),
             "FDC:169967": (35.0, 2.38, 7.18, 0.41),
             "FDC:170379": (34.0, 2.82, 6.64, 0.37),
@@ -69,6 +69,52 @@ class NutritionCatalogTests(unittest.TestCase):
         }
         self.assertEqual(actual, expected)
 
+    def test_verified_multi_food_totals_match_independent_per_100g_calculation(self):
+        self.service.seed_catalog(CURATED_NUTRITION_RECORDS)
+        records = {
+            item["source_identifier"]: item
+            for item in self.service.list_records()
+        }
+        portions = [
+            PortionEstimate(
+                class_id=class_id,
+                label=label,
+                estimated_weight_g=weight_g,
+                method="user_correction",
+                confidence=1.0,
+                uncertainty_g=0.0,
+                review_required=False,
+            )
+            for class_id, label, weight_g in (
+                (66, "rice", 150.0),
+                (48, "chicken", 200.0),
+                (3, "french fries", 100.0),
+            )
+        ]
+        calculation = self.service.calculate(
+            portions,
+            nutrition_record_ids={
+                66: records["FDC:168878"]["id"],
+                48: records["FDC:171477"]["id"],
+                3: records["FDC:170698"]["id"],
+            },
+        )
+
+        self.assertTrue(calculation.complete)
+        self.assertEqual(
+            calculation.totals.model_dump(exclude={"estimated", "source", "source_identifier", "version"}),
+            {
+                "kcal": 837.0,
+                "protein_g": 69.51,
+                "carbohydrates_g": 83.7,
+                "fat_g": 22.29,
+            },
+        )
+        self.assertEqual(
+            {item.source_identifier for item in (portion.nutrients for portion in calculation.items)},
+            {"FDC:168878", "FDC:171477", "FDC:170698"},
+        )
+
     def test_ambiguous_food_and_preparation_classes_require_explicit_selection(self):
         self.service.seed_catalog(CURATED_NUTRITION_RECORDS)
 
@@ -84,6 +130,49 @@ class NutritionCatalogTests(unittest.TestCase):
         selected = self.service.lookup_for_class(66, nutrition_record_id=rice["id"])
         self.assertIsNotNone(selected)
         self.assertEqual(selected[1].preparation_state, "cooked; long-grain, regular, enriched")
+
+    def test_chicken_duck_class_requires_explicit_species_and_source_record(self):
+        self.service.seed_catalog(CURATED_NUTRITION_RECORDS)
+        self.assertIsNone(self.service.lookup_for_class(48))
+
+        duck = next(
+            item for item in self.service.list_records(class_id=48)
+            if item["source_identifier"] == "FDC:172411"
+        )
+        selected = self.service.lookup_for_class(48, nutrition_record_id=duck["id"])
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected[1].food_identity, "duck, domesticated, meat only")
+        self.assertEqual(selected[1].protein_g_per_100g, 23.48)
+        self.assertEqual(selected[1].source_identifier, "FDC:172411")
+
+    def test_strawberry_cherry_and_blueberry_without_records_keep_nutrients_unavailable(self):
+        self.service.seed_catalog(CURATED_NUTRITION_RECORDS)
+        portions = [
+            PortionEstimate(
+                class_id=class_id,
+                label=label,
+                estimated_weight_g=100,
+                method="audit-fixture",
+                confidence=1.0,
+                uncertainty_g=0,
+                review_required=True,
+                simulated=False,
+            )
+            for class_id, label in ((30, "strawberry"), (31, "cherry"), (32, "blueberry"))
+        ]
+
+        result = self.service.calculate(portions, simulated=False)
+
+        self.assertFalse(result.complete)
+        self.assertIsNone(result.totals)
+        self.assertEqual(
+            [(item.class_id, item.nutrients, item.mapping_status) for item in result.items],
+            [
+                (30, None, "missing_or_ambiguous_verified_record"),
+                (31, None, "missing_or_ambiguous_verified_record"),
+                (32, None, "missing_or_ambiguous_verified_record"),
+            ],
+        )
 
     def test_mock_fixture_ids_never_resolve_real_catalog_records(self):
         self.service.seed_catalog(CURATED_NUTRITION_RECORDS)
