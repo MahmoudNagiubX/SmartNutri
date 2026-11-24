@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_system.h>
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -18,6 +19,9 @@
 #endif
 #ifndef SMARTNUTRI_WIFI_PASSWORD
 #define SMARTNUTRI_WIFI_PASSWORD ""
+#endif
+#ifndef SMARTNUTRI_DEVICE_TOKEN
+#define SMARTNUTRI_DEVICE_TOKEN ""
 #endif
 #ifndef SMARTNUTRI_STABILITY_WINDOW
 #define SMARTNUTRI_STABILITY_WINDOW 10
@@ -84,6 +88,8 @@ uint32_t lastSensorSampleMs = 0;
 uint32_t operationStartedMs = 0;
 uint32_t nextWifiAttemptMs = 0;
 uint32_t nextSerialLogMs = 0;
+uint32_t measurementSequence = 0;
+char deviceSessionId[9] = "00000000";
 int64_t operationRawSum = 0;
 uint8_t operationSampleCount = 0;
 float operationKnownWeightG = 0.0f;
@@ -182,7 +188,16 @@ bool startOperation(OperationType operation) {
   return true;
 }
 
-bool startTare() {
+bool startTare(const String& confirmation) {
+  if (confirmation != "EMPTY") {
+    if (activeOperation == OperationType::None) {
+      lastOperation = OperationType::Tare;
+      lastOperationState = OperationState::Failed;
+      lastOperationMessage = "explicit_empty_confirmation_required";
+    }
+    Serial.println(F("Tare refused: explicit EMPTY confirmation is required."));
+    return false;
+  }
   return startOperation(OperationType::Tare);
 }
 
@@ -218,6 +233,40 @@ bool startCalibration(float knownWeightG, const String& confirmation) {
     return false;
   }
   operationKnownWeightG = knownWeightG;
+  return true;
+}
+
+bool deviceSecretConfigured() {
+  return SMARTNUTRI_DEVICE_TOKEN[0] != '\0';
+}
+
+bool constantTimeTokenMatches(const String& supplied) {
+  const size_t expectedLength = strlen(SMARTNUTRI_DEVICE_TOKEN);
+  const size_t suppliedLength = supplied.length();
+  const size_t comparisonLength = expectedLength > suppliedLength ? expectedLength : suppliedLength;
+  uint8_t mismatch = expectedLength == suppliedLength ? 0 : 1;
+  for (size_t index = 0; index < comparisonLength; ++index) {
+    const uint8_t expectedByte = index < expectedLength
+                                    ? static_cast<uint8_t>(SMARTNUTRI_DEVICE_TOKEN[index])
+                                    : 0;
+    const uint8_t suppliedByte = index < suppliedLength
+                                     ? static_cast<uint8_t>(supplied[index])
+                                     : 0;
+    mismatch |= expectedByte ^ suppliedByte;
+  }
+  return mismatch == 0;
+}
+
+bool authorizeDeviceOperation() {
+  if (!deviceSecretConfigured()) {
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"device_auth_not_configured\"}");
+    return false;
+  }
+  if (!server.hasHeader("X-SmartNutri-Device-Token") ||
+      !constantTimeTokenMatches(server.header("X-SmartNutri-Device-Token"))) {
+    server.send(403, "application/json", "{\"ok\":false,\"error\":\"device_auth_failed\"}");
+    return false;
+  }
   return true;
 }
 
@@ -275,6 +324,7 @@ void expireStaleSensor() {
 
 void acceptRawSample(int32_t raw) {
   const uint32_t now = millis();
+  ++measurementSequence;
   sensorHasSample = true;
   lastSensorSampleMs = now;
 
@@ -364,6 +414,8 @@ String weightJson() {
   json += ",\"calibrated\":" + String(hasCalibration ? "true" : "false");
   json += ",\"stable\":" + String(strcmp(status, "stable") == 0 ? "true" : "false");
   json += ",\"status\":\"" + String(status) + "\",\"unit\":\"g\"";
+  json += ",\"device_session_id\":\"" + String(deviceSessionId) + "\"";
+  json += ",\"measurement_id\":\"" + String(deviceSessionId) + "-" + String(measurementSequence) + "\"";
   json += ",\"weight_g\":" + nullableFloat(currentWeightG, hasWeight, 2);
   json += ",\"weight_delta_g\":" + nullableFloat(currentDeltaG, hasWeight && hasPreviousWeight, 2);
   json += ",\"stability_range_g\":" + nullableFloat(rangeG, hasRange, 2);
@@ -392,13 +444,19 @@ void handleWeight() {
 }
 
 void handleTare() {
-  Serial.println(F("HTTP tare requested; remove all load before confirming externally."));
-  const bool started = startTare();
+  if (!authorizeDeviceOperation()) return;
+  if (!server.hasArg("confirm") || server.arg("confirm") != "EMPTY") {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"empty_scale_confirmation_required\"}");
+    return;
+  }
+  Serial.println(F("Authenticated empty-scale tare requested."));
+  const bool started = startTare(server.arg("confirm"));
   const int code = started ? 202 : (activeOperation != OperationType::None ? 409 : 503);
   server.send(code, "application/json", weightJson());
 }
 
 void handleCalibration() {
+  if (!authorizeDeviceOperation()) return;
   if (!server.hasArg("known_weight_g") || !server.hasArg("confirm")) {
     server.send(400, "application/json", "{\"ok\":false,\"error\":\"known_weight_g_and_confirm_required\"}");
     return;
@@ -417,6 +475,8 @@ void handleNotFound() {
 
 void startHttpServer() {
   if (!httpRoutesConfigured) {
+    const char* headerKeys[] = {"X-SmartNutri-Device-Token"};
+    server.collectHeaders(headerKeys, 1);
     server.on("/weight", HTTP_GET, handleWeight);
     server.on("/tare", HTTP_POST, handleTare);
     server.on("/calibrate", HTTP_POST, handleCalibration);
@@ -455,8 +515,9 @@ void serviceWifi() {
 }
 
 void printHelp() {
-  Serial.println(F("Commands: status | tare | calibrate <known_weight_g> CONFIRM | help"));
-  Serial.println(F("Calibration requires a known physical mass and the exact CONFIRM token."));
+  Serial.println(F("Commands: status | tare EMPTY | calibrate <known_weight_g> CALIBRATE | help"));
+  Serial.println(F("Tare requires a deliberate EMPTY confirmation and an empty scale."));
+  Serial.println(F("Calibration requires a known physical mass and the exact CALIBRATE confirmation."));
 }
 
 void handleSerialCommand(String command) {
@@ -466,14 +527,19 @@ void handleSerialCommand(String command) {
     printHelp();
   } else if (command == "status") {
     Serial.println(weightJson());
-  } else if (command == "tare") {
-    startTare();
+  } else if (command.startsWith("tare ")) {
+    const String confirmation = command.substring(5);
+    if (confirmation != "EMPTY") {
+      Serial.println(F("Tare refused. Enter: tare EMPTY (only with an empty scale)."));
+      return;
+    }
+    startTare(confirmation);
     Serial.println(weightJson());
   } else if (command.startsWith("calibrate ")) {
     const String args = command.substring(10);
     const int separator = args.indexOf(' ');
-    if (separator <= 0 || args.substring(separator + 1) != "CONFIRM") {
-      Serial.println(F("Calibration refused. Enter: calibrate <known_weight_g> CONFIRM"));
+    if (separator <= 0 || args.substring(separator + 1) != "CALIBRATE") {
+      Serial.println(F("Calibration refused. Enter: calibrate <known_weight_g> CALIBRATE"));
       return;
     }
     const float knownWeightG = args.substring(0, separator).toFloat();
@@ -514,6 +580,8 @@ void serviceSerial() {
 }  // namespace
 
 void setup() {
+  snprintf(deviceSessionId, sizeof(deviceSessionId), "%08lx",
+           static_cast<unsigned long>(esp_random()));
   Serial.begin(115200);
   Serial.setTimeout(100);
   delay(250);

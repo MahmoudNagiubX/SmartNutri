@@ -82,6 +82,26 @@ Nutrition figures in this HTTP run used explicitly synthetic fixtures and are no
 - pip-audit could not resolve the pinned CUDA packages `torch==2.11.0+cu128` and `torchvision==0.26.0+cu128` from PyPI, so their vulnerability status is NOT TESTED by that scan. Runtime packages are not claimed vulnerability-free on that basis.
 - Ruff, mypy, Bandit, Semgrep and Gitleaks were not installed. The PlatformIO cppcheck runner did not complete successfully.
 
+## AUDIT-02 verification addendum
+
+### Exact runs and results
+
+- Targeted backend/security/synchronization command, using the isolated `%TEMP%\\smartnutri-be02-backend-venv\\Scripts\\python.exe`: `python -m unittest tests.test_scale_monitor tests.test_scan_workflow tests.test_scale_service tests.test_agent_policy tests.test_camera_service tests.test_weight_api tests.test_backend_settings tests.test_backend_api tests.test_backend_repository tests.test_backend_contracts tests.test_automatic_scan_api -v` — **101 tests passed**. This includes weight changes during capture/inference, plate removal during analysis, disconnect, stale readings, backend restart, duplicate triggers, two placements, authenticated tare/calibration forwarding, correction rollback/idempotency, and camera URL restrictions.
+- Full discovery command, using the existing project `.venv` with runtime data redirected to a unique temporary `LOCALAPPDATA` and CUDA checks forced false to avoid GPU work: `python -c "import sys,unittest,torch; torch.cuda.is_available=lambda:False; suite=unittest.defaultTestLoader.discover('tests'); result=unittest.TextTestRunner(verbosity=2).run(suite); sys.exit(not result.wasSuccessful())"` — **173 tests run: 171 passed, 1 skipped (CUDA-only), 1 error**. The sole error is `tests/test_class_weighting.py::test_experiment_config_preserves_foodseg_label_and_ignore_contract`, which expects `configs/losses/experiment_2_class_weighted_ce.json`; that path is absent from the starting branch (`git ls-tree -r HEAD configs/losses` returned no file). Training config and the test were not changed. PyTorch emitted its Windows distributed-redirect note; Starlette emitted the existing `httpx` TestClient deprecation warning.
+- Real FastAPI HTTP smoke: launched `uvicorn smartnutri_backend.api:app` on loopback with mock scale/camera/CV and a unique temporary SQLite/runtime directory. Health was `ok`; a synthetic 300 g plate plus 750 g gross produced 450 g net, `simulated=true`, a matching `capture_placement_key`, and a distinct verified measurement ID. Result remained `NEEDS_REVIEW`; no mock estimates were represented as physical accuracy. Server was stopped after the smoke run.
+- Firmware build: `pio run -d firmware\\weight_scale -e esp32dev` — **PASS**, 57.03 s, 45,336 B RAM (13.8%) and 792,269 B flash (60.4%). No flash was performed.
+- Firmware static analysis: `pio check -d firmware\\weight_scale -e esp32dev --skip-packages --severity medium --fail-on-defect high` — **PASS**, cppcheck found no defects.
+- Python syntax: isolated backend interpreter `python -m compileall -q smartnutri_backend smartnutri_weight` — **PASS**.
+- `git diff --check` — **PASS**.
+
+### AUDIT-02 scope and limits
+
+- Scan placement snapshots now retain device session/measurement IDs, timestamps, weight, and host receive time. Weight is revalidated before capture, after capture, after inference, and before persistence. Software tolerances are defaults only; no physical calibration was performed.
+- ESP32 tare/calibration require a device-token header and exact explicit confirmations. The backend requires its separate control token. Read-only `GET /weight` remains unauthenticated. Both LAN protocols are plain HTTP; use only a trusted, firewalled private network.
+- Meal correction updates, nutrition totals, and scan status use one SQLite transaction, validated mass conservation, and an idempotency fingerprint.
+- The camera adapter now requires an exact operator-configured RFC1918 IPv4/port allowlist, blocks redirects and proxies, and bounds/validates image payloads. No real phone request was made.
+- No training, dataset, checkpoint, or physical hardware operation was performed.
+
 ## Not tested
 
 - Physical ESP32/HX711 measurements, wiring voltage, 5 kg overload, tare/calibration accuracy, or Wi-Fi disconnect/reconnect on a real device.

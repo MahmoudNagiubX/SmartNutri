@@ -77,6 +77,15 @@ class SQLiteRepository:
                     decision TEXT,
                     source TEXT NOT NULL CHECK (source IN ('hx711', 'mock')),
                     simulated INTEGER NOT NULL CHECK (simulated IN (0, 1)),
+                    device_session_id TEXT,
+                    measurement_id TEXT,
+                    measurement_timestamp_ms INTEGER,
+                    stable_weight_g REAL,
+                    measurement_received_at TEXT,
+                    verified_measurement_id TEXT,
+                    verified_weight_g REAL,
+                    verified_timestamp_ms INTEGER,
+                    verified_received_at TEXT,
                     tare_mode TEXT,
                     plate_profile_id TEXT REFERENCES plate_profiles(id) ON DELETE SET NULL,
                     measured_gross_weight_g REAL,
@@ -84,6 +93,7 @@ class SQLiteRepository:
                     measured_net_food_weight_g REAL,
                     capture_source TEXT,
                     capture_simulated INTEGER CHECK (capture_simulated IN (0, 1)),
+                    capture_placement_key TEXT,
                     capture_path TEXT,
                     annotated_path TEXT,
                     image_quality_json TEXT,
@@ -108,6 +118,7 @@ class SQLiteRepository:
                     carbohydrates_g_total REAL,
                     fat_g_total REAL,
                     correction_revision INTEGER NOT NULL DEFAULT 0,
+                    correction_fingerprint TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -136,6 +147,28 @@ class SQLiteRepository:
             nutrition_columns = {
                 row["name"] for row in self._connection.execute("PRAGMA table_info(nutrition_records)")
             }
+            scan_columns = {
+                row["name"] for row in self._connection.execute("PRAGMA table_info(scans)")
+            }
+            for name, declaration in (
+                ("device_session_id", "TEXT"),
+                ("measurement_id", "TEXT"),
+                ("measurement_timestamp_ms", "INTEGER"),
+                ("stable_weight_g", "REAL"),
+                ("measurement_received_at", "TEXT"),
+                ("verified_measurement_id", "TEXT"),
+                ("verified_weight_g", "REAL"),
+                ("verified_timestamp_ms", "INTEGER"),
+                ("verified_received_at", "TEXT"),
+                ("capture_placement_key", "TEXT"),
+            ):
+                if name not in scan_columns:
+                    self._connection.execute(f"ALTER TABLE scans ADD COLUMN {name} {declaration}")
+            meal_columns = {
+                row["name"] for row in self._connection.execute("PRAGMA table_info(meals)")
+            }
+            if "correction_fingerprint" not in meal_columns:
+                self._connection.execute("ALTER TABLE meals ADD COLUMN correction_fingerprint TEXT")
             if "source_identifier" not in nutrition_columns:
                 self._connection.execute(
                     "ALTER TABLE nutrition_records ADD COLUMN source_identifier TEXT NOT NULL DEFAULT ''"
@@ -330,15 +363,24 @@ class SQLiteRepository:
         source: str,
         simulated: bool,
         state: str = "WEIGHT_DETECTED",
+        device_session_id: str | None = None,
+        measurement_id: str | None = None,
+        measurement_timestamp_ms: int | None = None,
+        stable_weight_g: float | None = None,
+        measurement_received_at: str | None = None,
     ) -> dict[str, Any]:
         if source not in {"hx711", "mock"} or (source == "mock") != simulated:
             raise ValueError("scan source and simulated marker disagree")
         now, scan_id = utc_now(), str(uuid.uuid4())
         with self._lock, self._connection:
             self._connection.execute(
-                """INSERT INTO scans(id, placement_key, state, source, simulated, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(placement_key) DO NOTHING""",
-                (scan_id, placement_key, state, source, int(simulated), now, now),
+                """INSERT INTO scans(id, placement_key, state, source, simulated,
+                   device_session_id, measurement_id, measurement_timestamp_ms, stable_weight_g,
+                   measurement_received_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(placement_key) DO NOTHING""",
+                (scan_id, placement_key, state, source, int(simulated), device_session_id,
+                 measurement_id, measurement_timestamp_ms, stable_weight_g,
+                 measurement_received_at, now, now),
             )
             row = self._connection.execute(
                 "SELECT * FROM scans WHERE placement_key = ?", (placement_key,)
@@ -352,6 +394,11 @@ class SQLiteRepository:
         source: str,
         simulated: bool,
         state: str = "WEIGHT_DETECTED",
+        device_session_id: str | None = None,
+        measurement_id: str | None = None,
+        measurement_timestamp_ms: int | None = None,
+        stable_weight_g: float | None = None,
+        measurement_received_at: str | None = None,
     ) -> dict[str, Any]:
         """Atomically persist the dedupe record and restart latch."""
         if source not in {"hx711", "mock"} or (source == "mock") != simulated:
@@ -359,9 +406,13 @@ class SQLiteRepository:
         now, scan_id = utc_now(), str(uuid.uuid4())
         with self._lock, self._connection:
             self._connection.execute(
-                """INSERT INTO scans(id, placement_key, state, source, simulated, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(placement_key) DO NOTHING""",
-                (scan_id, placement_key, state, source, int(simulated), now, now),
+                """INSERT INTO scans(id, placement_key, state, source, simulated,
+                   device_session_id, measurement_id, measurement_timestamp_ms, stable_weight_g,
+                   measurement_received_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(placement_key) DO NOTHING""",
+                (scan_id, placement_key, state, source, int(simulated), device_session_id,
+                 measurement_id, measurement_timestamp_ms, stable_weight_g,
+                 measurement_received_at, now, now),
             )
             row = self._connection.execute(
                 "SELECT * FROM scans WHERE placement_key = ?", (placement_key,)
@@ -409,7 +460,10 @@ class SQLiteRepository:
         allowed = {
             "state", "decision", "tare_mode", "plate_profile_id",
             "measured_gross_weight_g", "plate_tare_weight_g", "measured_net_food_weight_g",
+            "verified_measurement_id", "verified_weight_g", "verified_timestamp_ms",
+            "verified_received_at",
             "capture_source", "capture_simulated", "capture_path", "annotated_path",
+            "capture_placement_key",
             "image_quality", "predictions", "portions", "nutrition_totals",
             "result_message", "error_code",
         }
@@ -632,6 +686,7 @@ class SQLiteRepository:
         result = cls._dict(row)
         if result is None:
             return None
+        result.pop("correction_fingerprint", None)
         result["nutrition_estimated"] = bool(result["nutrition_estimated"])
         scan_simulated = bool(result.pop("scan_simulated"))
         capture_simulated = bool(result.pop("scan_capture_simulated"))
@@ -689,28 +744,75 @@ class SQLiteRepository:
         items: list[dict[str, Any]],
         totals: dict[str, Any] | None,
         state: str,
+        scan_update: dict[str, Any],
+        correction_fingerprint: str,
+        weight_tolerance_g: float = 0.05,
     ) -> dict[str, Any]:
         now = utc_now()
         total_values = totals or {}
+        if not math.isfinite(weight_tolerance_g) or weight_tolerance_g < 0:
+            raise ValueError("correction weight tolerance must be finite and non-negative")
+        if len(correction_fingerprint) != 64 or any(
+            character not in "0123456789abcdef" for character in correction_fingerprint
+        ):
+            raise ValueError("correction fingerprint must be a lowercase SHA-256 digest")
+        if not items:
+            raise ValueError("a correction must include at least one food item")
+        if len({item.get("class_id") for item in items}) != len(items):
+            raise ValueError("each semantic class may appear once")
+        for item in items:
+            class_id = item.get("class_id")
+            weight_g = item.get("estimated_weight_g")
+            if isinstance(class_id, bool) or not isinstance(class_id, int) or not 1 <= class_id <= 103:
+                raise ValueError("correction contains an invalid FoodSeg103 class ID")
+            if not isinstance(item.get("food_label"), str) or not item["food_label"].strip():
+                raise ValueError("correction food label cannot be empty")
+            if isinstance(weight_g, bool) or not isinstance(weight_g, (int, float)) or not math.isfinite(weight_g) or weight_g <= 0:
+                raise ValueError("corrected food mass must be finite and positive")
         with self._lock, self._connection:
             existing = self._connection.execute(
-                "SELECT measured_net_food_weight_g FROM meals WHERE id = ?", (meal_id,)
+                "SELECT scan_id, measured_net_food_weight_g, correction_fingerprint FROM meals WHERE id = ?",
+                (meal_id,),
             ).fetchone()
             if existing is None:
                 raise KeyError(meal_id)
+            if existing["correction_fingerprint"] == correction_fingerprint:
+                result = self.get_meal(meal_id)
+                assert result is not None
+                return result
             corrected_total = sum(float(item["estimated_weight_g"]) for item in items)
-            if abs(corrected_total - float(existing["measured_net_food_weight_g"])) > 0.05:
+            if abs(corrected_total - float(existing["measured_net_food_weight_g"])) > weight_tolerance_g:
                 raise ValueError("corrected portion weights must conserve measured net food weight")
+            for item in items:
+                record_id = item.get("nutrition_record_id")
+                preparation_state = item.get("preparation_state")
+                if record_id is None:
+                    if preparation_state is not None:
+                        raise ValueError("preparation state requires a selected nutrition record")
+                    continue
+                record = self._connection.execute(
+                    """SELECT class_id, preparation_state, verified,
+                              requires_preparation_confirmation
+                       FROM nutrition_records WHERE id = ?""",
+                    (record_id,),
+                ).fetchone()
+                if record is None or not record["verified"] or record["class_id"] not in {None, item["class_id"]}:
+                    raise ValueError("correction contains an invalid nutrition record ID")
+                if preparation_state is not None and preparation_state != record["preparation_state"]:
+                    raise ValueError("correction preparation state does not match the nutrition record")
+                if record["requires_preparation_confirmation"] and preparation_state != record["preparation_state"]:
+                    raise ValueError("nutrition record requires explicit preparation confirmation")
             self._connection.execute(
                 """UPDATE meals SET state = ?, kcal_total = ?, protein_g_total = ?,
                    carbohydrates_g_total = ?, fat_g_total = ?, correction_revision = correction_revision + 1,
-                   updated_at = ? WHERE id = ?""",
+                   correction_fingerprint = ?, updated_at = ? WHERE id = ?""",
                 (
                     state,
                     total_values.get("kcal"),
                     total_values.get("protein_g"),
                     total_values.get("carbohydrates_g"),
                     total_values.get("fat_g"),
+                    correction_fingerprint,
                     now,
                     meal_id,
                 ),
@@ -737,6 +839,28 @@ class SQLiteRepository:
                         now,
                     ),
                 )
+            scan_columns = {
+                "state", "decision", "portions", "nutrition_totals", "result_message", "error_code"
+            }
+            unknown = set(scan_update) - scan_columns
+            if unknown:
+                raise ValueError(f"unsupported correction scan fields: {sorted(unknown)}")
+            encoded_scan: dict[str, Any] = {}
+            for key, value in scan_update.items():
+                column = key + "_json" if key in {"portions", "nutrition_totals"} else key
+                encoded_scan[column] = (
+                    json.dumps(value, separators=(",", ":"))
+                    if key in {"portions", "nutrition_totals"} and value is not None
+                    else value
+                )
+            encoded_scan["updated_at"] = now
+            assignments = ", ".join(f"{column} = ?" for column in encoded_scan)
+            cursor = self._connection.execute(
+                f"UPDATE scans SET {assignments} WHERE id = ?",
+                (*encoded_scan.values(), existing["scan_id"]),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(existing["scan_id"])
         result = self.get_meal(meal_id)
         assert result is not None
         return result

@@ -21,6 +21,8 @@ def stable_reading(**overrides):
         "stable": True,
         "status": "stable",
         "unit": "g",
+        "device_session_id": "fixture-device-session",
+        "measurement_id": "fixture-measurement-1",
         "weight_g": 750.0,
     }
     values.update(overrides)

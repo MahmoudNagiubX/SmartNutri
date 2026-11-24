@@ -1,10 +1,14 @@
 import unittest
+from itertools import count
 
 from smartnutri_backend.scale_monitor import MonitorEvent, ScaleMonitor
 from smartnutri_backend.schemas import ScanState, ScaleObservation
 
+_measurement_sequence = count(1)
 
-def reading(weight, *, stable=True, status=None, source="hx711", simulated=False):
+
+def reading(weight, *, stable=True, status=None, source="hx711", simulated=False,
+            session_id="unit-test-session", measurement_id=None):
     resolved_status = status or ("stable" if stable else "unstable")
     connected = resolved_status != "sensor_disconnected"
     ok = resolved_status not in {"sensor_disconnected", "sensor_error", "overload"}
@@ -18,6 +22,8 @@ def reading(weight, *, stable=True, status=None, source="hx711", simulated=False
         stable=stable,
         status=resolved_status,
         unit="g",
+        device_session_id=session_id,
+        measurement_id=measurement_id or f"unit-test-{next(_measurement_sequence)}",
         weight_g=weight if ok else None,
     )
 
@@ -165,6 +171,39 @@ class ScaleMonitorTests(unittest.TestCase):
         self.assertEqual(monitor.state, ScanState.WAITING_FOR_REMOVAL)
         self.assertEqual(monitor.active_placement_key, "persisted-placement")
         self.assertIsNone(monitor.observe(reading(750), now=0))
+
+    def test_active_placement_invalidates_weight_change_and_sensor_restart(self):
+        monitor = self.monitor(post_stability_delay_s=0)
+        monitor.observe(reading(750, stable=False), now=0)
+        monitor.observe(reading(750), now=0.1)
+        trigger = monitor.observe(reading(750), now=0.2)
+
+        changed = monitor.observe(reading(760), now=0.3)
+        self.assertEqual(changed.kind, "invalidated")
+        self.assertEqual(changed.reason, "weight_changed_during_scan")
+        self.assertEqual(monitor.snapshot_invalid_reason, "weight_changed_during_scan")
+        self.assertIsNone(monitor.observe(reading(750), now=0.4))
+
+        restarted = self.monitor(post_stability_delay_s=0)
+        restarted.observe(reading(750, stable=False), now=0)
+        restarted.observe(reading(750), now=0.1)
+        restarted.observe(reading(750), now=0.2)
+        event = restarted.observe(reading(750, session_id="new-device-session"), now=0.3)
+        self.assertEqual(event.kind, "invalidated")
+        self.assertEqual(event.reason, "scale_device_restarted")
+
+    def test_active_placement_invalidates_repeated_stale_measurement(self):
+        monitor = self.monitor(post_stability_delay_s=0, stale_reading_timeout_s=1.0)
+        monitor.observe(reading(750, stable=False), now=0)
+        monitor.observe(reading(750), now=0.1)
+        baseline = reading(750)
+        monitor.observe(baseline, now=0.2)
+
+        stale = monitor.observe(
+            reading(750, measurement_id=baseline.measurement_id), now=1.3
+        )
+        self.assertEqual(stale.kind, "invalidated")
+        self.assertEqual(stale.reason, "scale_reading_stale")
 
 
 if __name__ == "__main__":

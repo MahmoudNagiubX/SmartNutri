@@ -19,7 +19,7 @@ class RecordingWorkflow:
         self.started.append((scan_id, observation.weight_g, observation.simulated))
         self.repository.update_scan(scan_id, state=ScanState.COMPLETED.value)
 
-    def cancel(self, scan_id):
+    def cancel(self, scan_id, *, reason="plate_removed_during_scan"):
         self.cancelled.append(scan_id)
 
     def finish(self, scan_id):
@@ -118,10 +118,10 @@ class ScaleMonitoringServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.monitor.live_plate_weight_g, 300)
         self.client.set_weight(0)
         with self.assertRaisesRegex(RuntimeError, "remove the live-tared empty plate"):
-            service.configure_tare("platform_empty")
+            service.configure_tare("platform_empty", confirmation="EMPTY_PLATFORM")
 
         self.client.set_weight(-300)
-        configuration = service.configure_tare("platform_empty")
+        configuration = service.configure_tare("platform_empty", confirmation="EMPTY_PLATFORM")
         self.assertEqual(configuration["mode"], "saved_plate")
         self.assertFalse(configuration["live_tare_active"])
 

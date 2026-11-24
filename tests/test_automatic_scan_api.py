@@ -1,12 +1,16 @@
 import tempfile
 import unittest
+import asyncio
+import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 from smartnutri_backend.api import create_app
 from smartnutri_backend.camera import MockCameraService
 from smartnutri_backend.schemas import NutritionRecord
+from smartnutri_backend.schemas import ScaleObservation
 from smartnutri_backend.settings import Settings
 from smartnutri_backend.vision import SegmentationResult
 
@@ -74,6 +78,10 @@ class AutomaticScanApiTests(unittest.TestCase):
         self.assertEqual(scan["measured_gross_weight_g"], 750)
         self.assertEqual(scan["plate_tare_weight_g"], 300)
         self.assertEqual(scan["measured_net_food_weight_g"], 450)
+        self.assertEqual(scan["stable_weight_g"], 750)
+        self.assertTrue(scan["device_session_id"])
+        self.assertTrue(scan["measurement_id"])
+        self.assertEqual(scan["capture_placement_key"], scan["placement_key"])
         self.assertEqual({item["label"] for item in scan["predictions"]}, {"rice", "chicken", "fries"})
         self.assertTrue(scan["nutrition_totals"]["estimated"])
         self.assertEqual(scan["state"], "NEEDS_REVIEW")
@@ -106,7 +114,7 @@ class AutomaticScanApiTests(unittest.TestCase):
         runtime = self.client.app.state.runtime
         runtime.scale_client.set_weight(300)
         tare = self.client.post(
-            "/api/v1/scale/tare", json={"mode": "empty_plate", "confirm": "TARE"}
+            "/api/v1/scale/tare", json={"mode": "empty_plate", "confirm": "EMPTY_PLATE"}
         )
         self.assertEqual(tare.status_code, 200, tare.text)
         self.assertEqual(tare.json()["mode"], "live_plate")
@@ -138,7 +146,7 @@ class AutomaticScanApiTests(unittest.TestCase):
 
         tared = self.client.post(
             "/api/v1/scale/tare",
-            json={"mode": "empty_plate", "confirm": "TARE"},
+            json={"mode": "empty_plate", "confirm": "EMPTY_PLATE"},
         )
         self.assertEqual(tared.status_code, 200, tared.text)
         self.assertTrue(tared.json()["live_tare_active"])
@@ -206,6 +214,22 @@ class AutomaticScanApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 409)
         self.assertEqual(self.client.app.state.runtime.repository.list_scans(), [])
+
+    def test_separate_placements_get_distinct_snapshots_and_meals(self):
+        self.client.post(
+            "/api/v1/plates",
+            json={"name": "test plate", "empty_plate_weight_g": 300, "make_default": True},
+        )
+        monitor = self.client.app.state.runtime.monitor
+        first = asyncio.run(monitor.inject_mock_placement(750))["scan"]
+        asyncio.run(monitor.inject_mock_removal())
+        second = asyncio.run(monitor.inject_mock_placement(900))["scan"]
+
+        self.assertNotEqual(first["placement_key"], second["placement_key"])
+        self.assertNotEqual(first["measurement_id"], second["measurement_id"])
+        self.assertEqual(first["capture_placement_key"], first["placement_key"])
+        self.assertEqual(second["capture_placement_key"], second["placement_key"])
+        self.assertEqual(len(self.client.get("/api/v1/meals").json()), 2)
 
     def test_missing_verified_nutrition_mapping_never_fabricates_totals(self):
         self.client.post(
@@ -323,7 +347,7 @@ class AutomaticScanApiTests(unittest.TestCase):
         with protected:
             denied = protected.post(
                 "/api/v1/scale/tare",
-                json={"mode": "platform_empty", "confirm": "TARE"},
+                json={"mode": "platform_empty", "confirm": "EMPTY_PLATFORM"},
             )
             self.assertEqual(denied.status_code, 403)
 
@@ -391,6 +415,279 @@ class AutomaticScanApiTests(unittest.TestCase):
         self.assertIsNotNone(updated["kcal_total"])
         self.assertTrue(updated["simulated"])
 
+    def test_repeated_identical_correction_is_idempotent(self):
+        self.client.post(
+            "/api/v1/plates",
+            json={"name": "test plate", "empty_plate_weight_g": 300, "make_default": True},
+        )
+        fixture_nutrients(self.client.app.state.runtime)
+        scan = self.client.post(
+            "/api/v1/scans/mock-placement", json={"gross_weight_g": 750}
+        ).json()["scan"]
+        meal_id = scan["meal"]["id"]
+        payload = {
+            "items": [
+                {"class_id": 1, "label": "rice", "weight_g": 100},
+                {"class_id": 2, "label": "chicken", "weight_g": 200},
+                {"class_id": 3, "label": "fries", "weight_g": 150},
+            ]
+        }
 
+        first = self.client.post(f"/api/v1/meals/{meal_id}/corrections", json=payload)
+        second = self.client.post(f"/api/v1/meals/{meal_id}/corrections", json=payload)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(first.json()["correction_revision"], 1)
+        self.assertEqual(second.json()["correction_revision"], 1)
+        self.assertEqual(
+            [item["id"] for item in first.json()["items"]],
+            [item["id"] for item in second.json()["items"]],
+        )
+
+    def test_invalid_or_mismatched_nutrition_record_is_rejected_without_mutation(self):
+        self.client.post(
+            "/api/v1/plates",
+            json={"name": "test plate", "empty_plate_weight_g": 300, "make_default": True},
+        )
+        runtime = self.client.app.state.runtime
+        fixture_nutrients(runtime)
+        scan = self.client.post(
+            "/api/v1/scans/mock-placement", json={"gross_weight_g": 750}
+        ).json()["scan"]
+        meal_id = scan["meal"]["id"]
+        rice_record = runtime.repository.list_nutrition_records(class_id=1)[0]
+        original = runtime.repository.get_meal(meal_id)
+
+        for record_id in ("missing-record", rice_record["id"]):
+            response = self.client.post(
+                f"/api/v1/meals/{meal_id}/corrections",
+                json={
+                    "items": [
+                        {"class_id": 2, "label": "chicken", "weight_g": 450,
+                         "nutrition_record_id": record_id}
+                    ]
+                },
+            )
+            self.assertEqual(response.status_code, 422, response.text)
+            unchanged = runtime.repository.get_meal(meal_id)
+            self.assertEqual(unchanged["correction_revision"], original["correction_revision"])
+            self.assertEqual([item["id"] for item in unchanged["items"]], [item["id"] for item in original["items"]])
+
+    def test_preparation_confirmation_is_required_for_selected_record(self):
+        self.client.post(
+            "/api/v1/plates",
+            json={"name": "test plate", "empty_plate_weight_g": 300, "make_default": True},
+        )
+        runtime = self.client.app.state.runtime
+        fixture_nutrients(runtime)
+        record = runtime.nutrition.register(
+            NutritionRecord(
+                class_id=2,
+                food_identity="chicken breast",
+                preparation_state="roasted",
+                kcal_per_100g=165,
+                protein_g_per_100g=31,
+                carbohydrates_g_per_100g=0,
+                fat_g_per_100g=3.6,
+                source="synthetic-test-fixture",
+                source_identifier="test-fixture:chicken-roasted-confirmation",
+                version="fixture-v1",
+                verified=True,
+                requires_preparation_confirmation=True,
+            )
+        )
+        scan = self.client.post(
+            "/api/v1/scans/mock-placement", json={"gross_weight_g": 750}
+        ).json()["scan"]
+        meal_id = scan["meal"]["id"]
+        items = [
+            {"class_id": 1, "label": "rice", "weight_g": 100},
+            {"class_id": 2, "label": "chicken", "weight_g": 200,
+             "nutrition_record_id": record["id"]},
+            {"class_id": 3, "label": "fries", "weight_g": 150},
+        ]
+        rejected = self.client.post(f"/api/v1/meals/{meal_id}/corrections", json={"items": items})
+        self.assertEqual(rejected.status_code, 422, rejected.text)
+        items[1]["preparation_state"] = "roasted"
+        accepted = self.client.post(f"/api/v1/meals/{meal_id}/corrections", json={"items": items})
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(accepted.json()["correction_revision"], 1)
+        chicken = next(item for item in accepted.json()["items"] if item["class_id"] == 2)
+        self.assertEqual(chicken["food_label"], "chicken breast")
+
+    def test_failed_correction_rolls_back_meal_items_and_scan_update(self):
+        settings = Settings(
+            data_dir=Path(self.temp_dir.name) / "rollback",
+            scale_mode="mock",
+            auto_scan_enabled=False,
+            post_stability_delay_s=0.01,
+            stable_confirmations=2,
+        )
+        with TestClient(create_app(settings), raise_server_exceptions=False) as client:
+            client.post(
+                "/api/v1/plates",
+                json={"name": "test plate", "empty_plate_weight_g": 300, "make_default": True},
+            )
+            runtime = client.app.state.runtime
+            fixture_nutrients(runtime)
+            scan_body = client.post(
+                "/api/v1/scans/mock-placement", json={"gross_weight_g": 750}
+            ).json()["scan"]
+            meal_id = scan_body["meal"]["id"]
+            meal_before = runtime.repository.get_meal(meal_id)
+            scan_before = runtime.repository.get_scan(scan_body["id"])
+            runtime.repository._connection.execute(
+                """CREATE TRIGGER reject_test_correction BEFORE INSERT ON meal_items
+                   WHEN NEW.class_id = 2 BEGIN SELECT RAISE(ABORT, 'forced rollback'); END"""
+            )
+            runtime.repository._connection.commit()
+
+            response = client.post(
+                f"/api/v1/meals/{meal_id}/corrections",
+                json={
+                    "items": [
+                        {"class_id": 1, "label": "rice", "weight_g": 100},
+                        {"class_id": 2, "label": "chicken", "weight_g": 200},
+                        {"class_id": 3, "label": "fries", "weight_g": 150},
+                    ]
+                },
+            )
+            self.assertEqual(response.status_code, 500, response.text)
+            self.assertIn("no changes were saved", response.json()["detail"])
+            meal_after = runtime.repository.get_meal(meal_id)
+            scan_after = runtime.repository.get_scan(scan_body["id"])
+            self.assertEqual(meal_after["correction_revision"], meal_before["correction_revision"])
+            self.assertEqual([item["id"] for item in meal_after["items"]], [item["id"] for item in meal_before["items"]])
+            self.assertEqual(scan_after["state"], scan_before["state"])
+            self.assertEqual(scan_after["portions"], scan_before["portions"])
+
+    def test_real_device_tare_and_calibration_fail_closed_without_device_secret(self):
+        settings = Settings(
+            data_dir=Path(self.temp_dir.name) / "protected-device",
+            scale_mode="real",
+            scale_base_url="http://192.168.1.30",
+            control_token="api-control-secret",
+            scale_device_token=None,
+            auto_scan_enabled=False,
+        )
+        with TestClient(create_app(settings)) as client:
+            weight_client = client.app.state.runtime.scale_client
+            empty_platform = ScaleObservation(
+                ok=True,
+                source="hx711",
+                simulated=False,
+                sensor_connected=True,
+                tared=True,
+                calibrated=True,
+                stable=True,
+                status="stable",
+                unit="g",
+                device_session_id="test-device-session",
+                measurement_id="test-reading-1",
+                weight_g=0,
+                weight_delta_g=0,
+                stability_range_g=0,
+                timestamp_ms=1,
+            )
+            control = {"X-SmartNutri-Control-Token": "api-control-secret"}
+            with patch.object(weight_client, "get_weight", return_value=empty_platform), \
+                 patch("smartnutri_weight.client.urlopen") as urlopen:
+                tare = client.post(
+                    "/api/v1/scale/tare",
+                    json={"mode": "platform_empty", "confirm": "EMPTY_PLATFORM"},
+                    headers=control,
+                )
+                calibration = client.post(
+                    "/api/v1/scale/calibrate",
+                    json={"known_weight_g": 500, "confirm": "CALIBRATE"},
+                    headers=control,
+                )
+            self.assertEqual(tare.status_code, 503, tare.text)
+            self.assertEqual(calibration.status_code, 503, calibration.text)
+            self.assertNotIn("secret", tare.text.casefold())
+            self.assertNotIn("secret", calibration.text.casefold())
+            urlopen.assert_not_called()
+
+    def test_backend_forwards_device_token_and_explicit_operation_confirmations(self):
+        settings = Settings(
+            data_dir=Path(self.temp_dir.name) / "authenticated-device",
+            scale_mode="real",
+            scale_base_url="http://192.168.1.30",
+            control_token="api-control-secret",
+            scale_device_token="device-auth-secret",
+            auto_scan_enabled=False,
+        )
+        def response_for(operation):
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = json.dumps({
+                "ok": True,
+                "source": "hx711",
+                "simulated": False,
+                "sensor_connected": True,
+                "tared": True,
+                "calibrated": True,
+                "stable": True,
+                "status": "stable",
+                "unit": "g",
+                "weight_g": 0.0,
+                "weight_delta_g": 0.0,
+                "stability_range_g": 0.0,
+                "stability_threshold_g": 2.0,
+                "sample_count": 10,
+                "window_size": 10,
+                "timestamp_ms": 100,
+                "device_session_id": "test-session",
+                "measurement_id": f"test-session-{operation}",
+                "operation": operation,
+                "operation_status": "succeeded",
+                "operation_ok": True,
+                "operation_message": f"{operation}_saved",
+            }).encode("utf-8")
+            return response
+
+        with TestClient(create_app(settings)) as client:
+            weight_client = client.app.state.runtime.scale_client
+            empty_platform = ScaleObservation(
+                ok=True,
+                source="hx711",
+                simulated=False,
+                sensor_connected=True,
+                tared=True,
+                calibrated=True,
+                stable=True,
+                status="stable",
+                unit="g",
+                device_session_id="test-session",
+                measurement_id="test-session-before-tare",
+                weight_g=0,
+                weight_delta_g=0,
+                stability_range_g=0,
+                timestamp_ms=99,
+            )
+            with patch.object(weight_client, "get_weight", return_value=empty_platform), \
+                 patch("smartnutri_weight.client.urlopen", side_effect=[response_for("tare"), response_for("calibrate")]) as urlopen:
+                headers = {"X-SmartNutri-Control-Token": "api-control-secret"}
+                tare = client.post(
+                    "/api/v1/scale/tare",
+                    json={"mode": "platform_empty", "confirm": "EMPTY_PLATFORM"},
+                    headers=headers,
+                )
+                calibration = client.post(
+                    "/api/v1/scale/calibrate",
+                    json={"known_weight_g": 500, "confirm": "CALIBRATE"},
+                    headers=headers,
+                )
+
+        self.assertEqual(tare.status_code, 200, tare.text)
+        self.assertEqual(calibration.status_code, 200, calibration.text)
+        tare_request, calibration_request = [call.args[0] for call in urlopen.call_args_list]
+        for request in (tare_request, calibration_request):
+            self.assertEqual(request.get_header("X-smartnutri-device-token"), "device-auth-secret")
+            self.assertNotIn("device-auth-secret", request.full_url)
+        self.assertEqual(tare_request.data, b"confirm=EMPTY")
+        self.assertEqual(
+            calibration_request.data,
+            b"known_weight_g=500&confirm=CALIBRATE",
+        )
 if __name__ == "__main__":
     unittest.main()

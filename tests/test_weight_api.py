@@ -30,6 +30,8 @@ def mock_weight_payload(weight_g: float = 125.4, **overrides: object) -> dict[st
         "sample_count": 0,
         "window_size": 10,
         "timestamp_ms": 0,
+        "device_session_id": "fixture-session",
+        "measurement_id": "fixture-reading",
     }
     payload.update(overrides)
     return payload
@@ -57,6 +59,8 @@ def hardware_error_payload(
         "sample_count": 0,
         "window_size": 10,
         "timestamp_ms": 0,
+        "device_session_id": "fixture-session",
+        "measurement_id": "fixture-reading",
     }
     payload.update(overrides)
     return payload
@@ -128,11 +132,13 @@ class WeightApiTests(unittest.TestCase):
             "smartnutri_weight.client.urlopen", return_value=http_response(payload)
         ) as urlopen:
             with self.assertRaisesRegex(RuntimeError, "simulated"):
-                WeightClient("http://scale.local").tare()
+                WeightClient("http://scale.local", device_token="test-device-token").tare(confirmation="EMPTY")
 
         request = urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "http://scale.local/tare")
         self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(request.get_header("X-smartnutri-device-token"), "test-device-token")
+        self.assertNotIn("token=", request.full_url)
 
     def test_async_tare_poll_does_not_hide_a_simulated_result(self) -> None:
         pending = mock_weight_payload(
@@ -147,11 +153,11 @@ class WeightApiTests(unittest.TestCase):
             operation_ok=True,
             operation_message="tare_saved",
         )
-        client = WeightClient("http://scale.local", retry_delay_s=0)
+        client = WeightClient("http://scale.local", retry_delay_s=0, device_token="test-device-token")
         with patch.object(client, "_request", side_effect=[pending, completed]) as request:
             with patch("smartnutri_weight.client.time.sleep"):
                 with self.assertRaisesRegex(RuntimeError, "simulated"):
-                    client.tare()
+                    client.tare(confirmation="EMPTY")
 
         self.assertEqual(request.call_args_list[-1].args, ("GET", "/weight"))
 
@@ -167,11 +173,11 @@ class WeightApiTests(unittest.TestCase):
             operation_ok=False,
             operation_message="sensor_disconnected",
         )
-        client = WeightClient("http://scale.local", retry_delay_s=0)
+        client = WeightClient("http://scale.local", retry_delay_s=0, device_token="test-device-token")
         with patch.object(client, "_request", side_effect=[pending, failed]):
             with patch("smartnutri_weight.client.time.sleep"):
                 with self.assertRaisesRegex(RuntimeError, "sensor_disconnected"):
-                    client.tare()
+                    client.tare(confirmation="EMPTY")
 
     def test_confirmed_calibration_posts_expected_form_but_rejects_mock_result(self) -> None:
         pending = mock_weight_payload(
@@ -186,7 +192,7 @@ class WeightApiTests(unittest.TestCase):
             operation_ok=True,
             operation_message="calibration_saved",
         )
-        client = WeightClient("http://scale.local", retry_delay_s=0)
+        client = WeightClient("http://scale.local", retry_delay_s=0, device_token="test-device-token")
         with patch.object(client, "_request", side_effect=[pending, completed]) as request:
             with patch("smartnutri_weight.client.time.sleep"):
                 with self.assertRaisesRegex(RuntimeError, "simulated"):
@@ -198,7 +204,7 @@ class WeightApiTests(unittest.TestCase):
         )
 
     def test_get_retries_transient_disconnect_but_post_is_not_retried(self) -> None:
-        client = WeightClient("http://scale.local", retry_delay_s=0, max_get_retries=1)
+        client = WeightClient("http://scale.local", retry_delay_s=0, max_get_retries=1, device_token="test-device-token")
         with patch(
             "smartnutri_weight.client.urlopen",
             side_effect=[URLError("temporary disconnect"), http_response(mock_weight_payload())],
@@ -209,7 +215,7 @@ class WeightApiTests(unittest.TestCase):
 
         with patch("smartnutri_weight.client.urlopen", side_effect=URLError("offline")) as urlopen:
             with self.assertRaises(URLError):
-                client.tare()
+                client.tare(confirmation="EMPTY")
         self.assertEqual(urlopen.call_count, 1)
 
     def test_http_error_body_is_reported_after_bounded_get_retry(self) -> None:
@@ -266,7 +272,7 @@ class WeightApiTests(unittest.TestCase):
             )
 
     def test_mock_tare_stays_explicitly_simulated(self) -> None:
-        reading = WeightClient(mock_weight_g=250.0).tare()
+        reading = WeightClient(mock_weight_g=250.0).tare(confirmation="EMPTY")
 
         self.assertEqual(reading.weight_g, 0.0)
         self.assertEqual(reading.source, "mock")
@@ -277,6 +283,20 @@ class WeightApiTests(unittest.TestCase):
 
         with self.assertRaises(PermissionError):
             client.calibrate(500.0)
+
+    def test_device_operations_fail_closed_without_device_token(self) -> None:
+        client = WeightClient("http://scale.local")
+        with patch("smartnutri_weight.client.urlopen") as urlopen:
+            with self.assertRaisesRegex(PermissionError, "device token"):
+                client.tare(confirmation="EMPTY")
+            with self.assertRaisesRegex(PermissionError, "device token"):
+                client.calibrate(500.0, confirmation="CALIBRATE")
+        urlopen.assert_not_called()
+
+    def test_tare_requires_specific_empty_confirmation(self) -> None:
+        client = WeightClient("http://scale.local", device_token="test-device-token")
+        with self.assertRaisesRegex(PermissionError, "EMPTY"):
+            client.tare()
 
     def test_calibration_rejects_out_of_range_known_weights(self) -> None:
         client = WeightClient(base_url="http://127.0.0.1")

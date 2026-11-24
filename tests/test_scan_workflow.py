@@ -29,6 +29,18 @@ class BlockingCamera(MockCameraService):
         return super().capture_raw()
 
 
+class BlockingInference:
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.delegate = MockSegmentationService()
+
+    def infer(self, capture, *, scan_id):
+        self.started.set()
+        self.release.wait(timeout=3)
+        return self.delegate.infer(capture, scan_id=scan_id)
+
+
 class ScanWorkflowTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -87,6 +99,87 @@ class ScanWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scan["state"], ScanState.NEEDS_REVIEW.value)
         self.assertEqual(scan["error_code"], "plate_removed_during_scan")
         self.assertIsNone(scan["capture_path"])
+        self.assertIsNone(self.repository.get_meal_by_scan(scan["id"]))
+
+    async def test_weight_change_during_capture_rejects_weight_image_pair(self):
+        observation = self.scale.set_weight(750)
+        now = time.monotonic()
+        await self.service.observe(observation, now=now)
+        await self.service.observe(observation, now=now + 0.05)
+        event = await self.service.observe(observation, now=now + 0.1)
+        self.assertIsNotNone(event)
+        self.assertTrue(await asyncio.wait_for(asyncio.to_thread(self.camera.capture_started.wait), timeout=1))
+
+        changed = self.scale.set_weight(800)
+        await self.service.observe(changed)
+        self.camera.release_capture.set()
+        await asyncio.gather(*tuple(self.service._scan_tasks), return_exceptions=True)
+
+        scan = self.repository.get_scan_by_placement(event.placement_key)
+        self.assertEqual(scan["error_code"], "weight_changed_during_scan")
+        self.assertIsNone(scan["capture_path"])
+        self.assertIsNone(self.repository.get_meal_by_scan(scan["id"]))
+
+    async def test_weight_change_during_inference_rejects_analysis(self):
+        self.camera.release_capture.set()
+        inference = BlockingInference()
+        self.workflow.inference = inference
+        observation = self.scale.set_weight(750)
+        now = time.monotonic()
+        await self.service.observe(observation, now=now)
+        await self.service.observe(observation, now=now + 0.05)
+        event = await self.service.observe(observation, now=now + 0.1)
+        self.assertIsNotNone(event)
+        self.assertTrue(await asyncio.wait_for(asyncio.to_thread(inference.started.wait), timeout=1))
+
+        changed = self.scale.set_weight(800)
+        await self.service.observe(changed)
+        inference.release.set()
+        await asyncio.gather(*tuple(self.service._scan_tasks), return_exceptions=True)
+
+        scan = self.repository.get_scan_by_placement(event.placement_key)
+        self.assertEqual(scan["error_code"], "weight_changed_during_scan")
+        self.assertIsNone(self.repository.get_meal_by_scan(scan["id"]))
+
+    async def test_sensor_disconnect_during_inference_rejects_analysis(self):
+        self.camera.release_capture.set()
+        inference = BlockingInference()
+        self.workflow.inference = inference
+        observation = self.scale.set_weight(750)
+        now = time.monotonic()
+        await self.service.observe(observation, now=now)
+        await self.service.observe(observation, now=now + 0.05)
+        event = await self.service.observe(observation, now=now + 0.1)
+        self.assertIsNotNone(event)
+        self.assertTrue(await asyncio.wait_for(asyncio.to_thread(inference.started.wait), timeout=1))
+
+        await self.service.observe(None)
+        inference.release.set()
+        await asyncio.gather(*tuple(self.service._scan_tasks), return_exceptions=True)
+
+        scan = self.repository.get_scan_by_placement(event.placement_key)
+        self.assertEqual(scan["error_code"], "scale_disconnected")
+        self.assertIsNone(self.repository.get_meal_by_scan(scan["id"]))
+
+    async def test_plate_removal_during_inference_rejects_analysis(self):
+        self.camera.release_capture.set()
+        inference = BlockingInference()
+        self.workflow.inference = inference
+        observation = self.scale.set_weight(750)
+        now = time.monotonic()
+        await self.service.observe(observation, now=now)
+        await self.service.observe(observation, now=now + 0.05)
+        event = await self.service.observe(observation, now=now + 0.1)
+        self.assertIsNotNone(event)
+        self.assertTrue(await asyncio.wait_for(asyncio.to_thread(inference.started.wait), timeout=1))
+
+        removed = self.scale.set_weight(0)
+        await self.service.observe(removed)
+        inference.release.set()
+        await asyncio.gather(*tuple(self.service._scan_tasks), return_exceptions=True)
+
+        scan = self.repository.get_scan_by_placement(event.placement_key)
+        self.assertEqual(scan["error_code"], "plate_removed_during_scan")
         self.assertIsNone(self.repository.get_meal_by_scan(scan["id"]))
 
 

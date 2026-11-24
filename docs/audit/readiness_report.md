@@ -2,7 +2,28 @@
 
 Assessment date: 2026-11-24. Ratings reflect current evidence and unresolved defects, not a roadmap promise.
 
-## Readiness verdicts
+## AUDIT-02 current verdicts
+
+| Gate | Verdict | Current evidence and boundary |
+|---|---|---|
+| A. Ready for design system | **GREEN** | Product direction and Flutter target remain documented; this corrective task did not create a UI or design system. |
+| B. Ready for Flutter implementation | **AMBER** | Versioned API schemas, scan snapshot fields, mock mode, meal history, correction paths, and loopback HTTP smoke testing are available. Snapshot synchronization and device-operation authentication are software-tested. A safe control-token mediation design and a real Android/LAN integration test are still needed before Flutter may operate real hardware; never bundle the shared control token in the app. |
+| C. Ready for mock end-to-end demo | **GREEN** | A real loopback Uvicorn/FastAPI + temporary SQLite run passed the simulated saved-plate case: 300 g plate, 750 g synthetic gross, and 450 g net. It confirmed placement-bound capture and a distinct revalidation measurement. Relevant route/unit tests preserve mock provenance and review-required portions. |
+| D. Ready for real hardware demo | **RED** | No physical test occurred. Firmware compilation and cppcheck pass, but ESP32 secret provisioning, authenticated device exchange, calibration, HX711 behavior, physical thresholds, phone capture, Wi-Fi, and restart pairing remain unverified. ESP32 HTTP is unencrypted and must remain on an isolated, firewalled LAN. |
+| E. Ready for reliable nutrition estimation | **RED** | AUDIT-01 coverage remains sparse and the portion estimator remains experimental. No real per-food mass or nutrition validation was performed in AUDIT-02. |
+
+No unconditional green light is issued. The mock demo gate is green; real hardware and reliable nutrition remain blocked. Full test discovery still has one unrelated error: a class-weighting test references a config file absent from the starting branch. See the AUDIT-02 evidence addendum.
+
+### Remaining progression conditions
+
+- Calibrate the software weight-change and stale-reading defaults (5 g and 2 s) against the physical scale.
+- Provision matching random device secrets only in ignored local configuration and verify authenticated tare/calibration on hardware after explicit operator approval.
+- Verify wiring, HX711 3.3 V levels, tare/calibration, stability/removal, overload, disconnect recovery, and Wi-Fi recovery physically.
+- Test the Android phone snapshot endpoint through its reserved private IPv4/port under controlled lighting. The URL adapter now blocks unapproved hosts, redirects, and environment proxies.
+- Add a safe device-control mediation/authentication path before a native client can use privileged real-hardware operations; keep the backend control secret private.
+- Continue the controlled multi-food mass/nutrition study before promoting estimated grams or macros as reliable.
+
+## AUDIT-01 baseline verdicts (retained for history)
 
 | Gate | Verdict | Evidence and boundary |
 |---|---|---|
@@ -14,7 +35,7 @@ Assessment date: 2026-11-24. Ratings reflect current evidence and unresolved def
 
 There is no unconditional overall green light. Mock software exploration can proceed; real-device and reliable-nutrition claims cannot.
 
-## Progression conditions
+## AUDIT-01 progression conditions (historical; see current conditions above)
 
 ### Before a trusted real-hardware demo
 
@@ -37,7 +58,7 @@ There is no unconditional overall green light. Mock software exploration can pro
 3. Test Flutter over the actual trusted Wi-Fi route and keep control credentials out of the mobile package.
 4. Preserve provenance for synthetic, file, phone-camera, mock-CV and real-model outputs in every UI surface.
 
-## Recommended priority
+## AUDIT-01 priority list (historical; see current conditions above)
 
 | Priority | Work | Why |
 |---|---|---|

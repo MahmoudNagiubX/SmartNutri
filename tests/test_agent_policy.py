@@ -25,6 +25,8 @@ def scale(status="stable", weight=450, *, stable=True, simulated=False):
         stable=stable,
         status=status,
         unit="g",
+        device_session_id="agent-test-session",
+        measurement_id="agent-test-reading",
         weight_g=None if error else weight,
     )
 

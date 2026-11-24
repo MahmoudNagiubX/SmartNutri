@@ -34,6 +34,25 @@ class BackendApiTests(unittest.TestCase):
         self.assertIsNone(scale.json()["weight_g"])
         self.assertFalse(scale.json()["simulated"])
 
+    def test_health_response_and_settings_repr_do_not_expose_device_secrets(self):
+        protected = create_app(
+            Settings(
+                data_dir=Path(self.temp_dir.name) / "protected-health",
+                scale_mode="real",
+                scale_base_url="http://192.168.1.30",
+                control_token="test-control-secret",
+                scale_device_token="test-device-secret",
+                auto_scan_enabled=False,
+            )
+        )
+        with TestClient(protected) as client:
+            health = client.get("/api/v1/health")
+        self.assertEqual(health.status_code, 200)
+        self.assertNotIn("test-control-secret", health.text)
+        self.assertNotIn("test-device-secret", health.text)
+        self.assertNotIn("test-control-secret", repr(protected.state.runtime.settings))
+        self.assertNotIn("test-device-secret", repr(protected.state.runtime.settings))
+
     def test_plate_profile_and_default_are_persisted(self):
         created = self.client.post(
             "/api/v1/plates",

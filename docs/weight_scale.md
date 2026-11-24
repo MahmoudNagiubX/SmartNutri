@@ -42,22 +42,22 @@ On boot, Serial prints help and status JSON once per second. USB operation does 
 
 ## Tare and calibration
 
-Calibration changes persistent ESP32 Preferences values. Use a verified physical mass and send the explicit confirmation token only when ready to write the calibration:
+Calibration changes persistent ESP32 Preferences values. Device write operations require a shared secret in addition to the explicit confirmation. Copy the ignored example file to `firmware/weight_scale/include/secrets.h`, set `SMARTNUTRI_DEVICE_TOKEN` there, and set the matching `SMARTNUTRI_SCALE_DEVICE_TOKEN` in the backend environment. Keep the secret out of URLs, source control, screenshots, and logs. Leave it unset for USB-only/read-only operation; HTTP tare and calibration fail closed.
 
 1. Mount the load cell and platform. Leave the platform empty and mechanically unloaded.
-2. Open Serial Monitor at 115200 baud and send `tare`, or send an HTTP `POST /tare` request. The operation starts asynchronously, collects eight HX711 conversions in the regular sample loop, then saves the raw offset in Preferences. The main loop remains responsive while samples are collected.
-3. Place a known physical mass on the platform, wait for it to settle, then send `calibrate 500 CONFIRM` for a 500 g mass. Replace `500` with the verified mass in grams. The exact `CONFIRM` token is required. Calibration collects eight samples in the normal loop and saves the signed raw-counts-per-gram factor in Preferences.
+2. Open Serial Monitor at 115200 baud and send `tare EMPTY` only while the platform is empty. Over HTTP, the backend requires an authenticated operator request and an explicit tare mode/confirmation; it then sends `POST /tare` with `confirm=EMPTY` and the device-token header. The operation starts asynchronously, collects eight HX711 conversions in the regular sample loop, then saves the raw offset in Preferences. The main loop remains responsive while samples are collected.
+3. Place a known physical mass on the platform, wait for it to settle, then send `calibrate 500 CALIBRATE` for a 500 g mass. Replace `500` with the verified mass in grams. The exact `CALIBRATE` confirmation is required. Calibration collects eight samples in the normal loop and saves the signed raw-counts-per-gram factor in Preferences.
 4. Remove the mass and verify the reported reading. If the direction is reversed, the signed factor handles it; if the magnitude is wrong, repeat tare and calibration with a known mass.
 
-Calibration is limited to a positive known mass no greater than 5000 g. The firmware rejects calibration until the scale is tared and the explicit confirmation is present. HTTP calibration uses form fields `known_weight_g` and `confirm=CALIBRATE`, for example:
+Calibration is limited to a positive known mass no greater than 5000 g. The firmware rejects calibration until the scale is tared and the explicit confirmation and device-token header are present. HTTP calibration uses form fields `known_weight_g` and `confirm=CALIBRATE`, plus `X-SmartNutri-Device-Token`; do not put credentials in the URL. The backend additionally requires its own control token for real hardware operations. The ESP32 API uses plain HTTP, so the shared device token is visible to other clients able to observe the LAN traffic. Use a trusted, isolated private LAN, firewall both devices, and never port-forward or expose the device publicly. HTTP does not provide transport encryption or server identity verification.
 
 ```powershell
-curl.exe -X POST http://ESP32_IP/calibrate -H "Content-Type: application/x-www-form-urlencoded" --data "known_weight_g=500&confirm=CALIBRATE"
+curl.exe -X POST http://ESP32_IP/calibrate -H "X-SmartNutri-Device-Token: <local-secret>" -H "Content-Type: application/x-www-form-urlencoded" --data "known_weight_g=500&confirm=CALIBRATE"
 ```
 
-Replace `ESP32_IP` with the address printed after Wi-Fi connects. Keep the known mass on the platform during this request. `POST /tare` should be used only after removing all load.
+Replace `ESP32_IP` with the address printed after Wi-Fi connects. Keep the known mass on the platform during this request. Include the configured device-token header when calling the firmware directly. `POST /tare` should be used only after removing all load.
 
-To inspect the API manually, use `curl.exe http://ESP32_IP/weight` for a reading or `curl.exe -X POST http://ESP32_IP/tare` with the platform empty. Both tare and calibration complete asynchronously; the Python client polls `GET /weight` and returns after success or raises with the terminal operation state.
+To inspect the API manually, use `curl.exe http://ESP32_IP/weight` for a read-only reading. Protected direct calls require the device-token header, for example `curl.exe -X POST http://ESP32_IP/tare -H "X-SmartNutri-Device-Token: <local-secret>" -H "Content-Type: application/x-www-form-urlencoded" --data "confirm=EMPTY"`. Both tare and calibration complete asynchronously; the Python client polls `GET /weight` and returns after success or raises with the terminal operation state. Never enable automatic tare based only on a weight threshold: an operator must confirm the platform/plate is empty.
 
 ## API contract
 
@@ -72,9 +72,10 @@ To inspect the API manually, use `curl.exe http://ESP32_IP/weight` for a reading
 | `unit`, `weight_g`, `weight_delta_g` | Grams, current filtered reading, and signed change from the last accepted reading. Weight and delta are `null` until available. |
 | `stability_range_g`, `stability_threshold_g` | Max-minus-min range in the active window and its configured threshold. Range is `null` before the first weight sample. |
 | `sample_count`, `window_size`, `timestamp_ms` | Window fill, configured window length, and ESP32 uptime in milliseconds. |
+| `device_session_id`, `measurement_id` | Random firmware boot-session identifier and monotonically increasing sample ID. The backend stores the placement's stable measurement and a later revalidation measurement with host receive timestamps. A changed device session or stale/repeated sample invalidates an active scan. |
 | `operation`, `operation_status`, `operation_ok`, `operation_message` | Latest tare/calibration state. `operation_status` is `idle`, `pending`, `succeeded`, or `failed`; `operation_ok` is null until completion. |
 
-`POST /tare` and valid `POST /calibrate` requests return HTTP `202` with the reading fields and operation fields. While samples are collected, status is `pending` and `operation_ok` is null. The Python client polls `GET /weight` until the operation succeeds or fails. Failed starts return a non-2xx response; asynchronous failures appear in the operation fields. Calibration requests must include form-encoded `known_weight_g=<grams>&confirm=CALIBRATE`.
+`GET /weight` remains read-only and does not require a device secret. `POST /tare` and valid `POST /calibrate` require `X-SmartNutri-Device-Token`; if the firmware has no configured device secret they return `503`, and missing/incorrect credentials return `403`. Tare additionally requires form-encoded `confirm=EMPTY`; calibration requires `known_weight_g=<grams>&confirm=CALIBRATE`. Requests return HTTP `202` with reading and operation fields. While samples are collected, status is `pending` and `operation_ok` is null. The Python client polls `GET /weight` until the operation succeeds or fails. Failed starts return non-2xx; asynchronous failures appear in the operation fields. The backend separately requires its control token before forwarding real device operations.
 
 Defaults in `platformio.ini` are a 10-sample window, a 2.0 g max-minus-min stability threshold, and a 100 ms sample period. Build flags can be changed for a separate firmware experiment. A weight becomes stable only after the whole window is populated and its range is at most the threshold. Filtering is a median over up to five raw samples followed by an EMA with alpha 0.35; it reduces short spikes but cannot correct mechanical vibration, creep, off-center loading, or poor mounting. Values whose absolute magnitude exceeds the 5 kg rated capacity are reported as `overload` with no usable weight. Near-saturated 24-bit ADC values are reported as `sensor_error`. Small negative readings after tare are retained as diagnostic values; the host should not record a negative addition as food mass.
 
@@ -99,7 +100,7 @@ assert mock.source == "mock" and mock.simulated is True
 
 Mock mode makes no network request; mock payloads have `sensor_connected=false`, `source="mock"`, `simulated=true`, and `status="mock"`. The backend stability and delta tests use only such explicitly simulated values. Client-side calibration also requires `confirmation="CALIBRATE"` and is disabled in mock mode.
 
-The HTTP API is unauthenticated. Use it only on a trusted, isolated local network; do not expose it to the public internet. The confirmation token prevents accidental calibration calls but is not authentication.
+The scale read endpoint is unauthenticated; tare and calibration require device authentication and explicit confirmation. Because the firmware uses plain HTTP, the device token is not encrypted in transit. Use only on a trusted, isolated local network with firewall rules; do not expose or port-forward the ESP32. The backend control token and ESP32 device token are distinct secrets and must be kept in ignored local configuration.
 
 ## Testing and hardware validation
 
@@ -116,11 +117,11 @@ The scale tests validate API payload parsing, mock labeling, asynchronous operat
 
 1. With power disconnected, check HX711 VCC/GND and DOUT/SCK pin routing. Verify load-cell E+/E-/A+/A- mapping from that cell's markings/datasheet; do not use color assumptions.
 2. Connect the ESP32 over USB, open Serial at 115200, and confirm the startup log and `source="hx711"`, `simulated=false` status. A ready sensor should leave `sensor_disconnected`; no weight is usable until tare and calibration are loaded or performed.
-3. With the platform empty, send `tare`; wait for `operation_status="succeeded"`. Power-cycle and verify `tared=true` and saved calibration flags persist without automatic re-tare.
+3. With the platform empty, send `tare EMPTY` over Serial, or use the authenticated backend operation after explicit `platform_empty` confirmation. Wait for `operation_status="succeeded"`. Power-cycle and verify `tared=true` and saved calibration flags persist without automatic re-tare.
 4. Perform confirmed calibration using a verified mass, then check at a second known mass without exceeding the 5 kg rating. Record error, repeatability, sign, and off-center response. Do not deliberately overload the load cell to test the software guard.
 5. Apply and remove a small mass. Confirm the output passes through `warming_up`/`unstable` before `stable`, that readings settle within the configured threshold/window, and that `weight_delta_g` has the expected sign. Small negative unloaded drift is diagnostic; never record it as added food mass.
 6. For sensor-loss behavior, power down before changing wiring, disconnect/reconnect the HX711, and verify `sensor_disconnected`/recovery behavior. Do not hot-plug load-cell wires.
-7. With configured Wi-Fi, call `GET /weight`, `POST /tare` on an empty platform, and confirmed `POST /calibrate` on a known mass from the laptop. Restart the access point and confirm the device reconnects and serves the API again. Keep the API on a trusted LAN.
+7. With configured Wi-Fi and matching device token, call read-only `GET /weight`, authenticated `POST /tare` on an empty platform, and confirmed authenticated `POST /calibrate` on a known mass from the laptop. Restart the access point and confirm the device reconnects and serves the API again. Keep the API on a trusted LAN.
 
 No physical calibration, flashing, or hardware test was performed here.
 

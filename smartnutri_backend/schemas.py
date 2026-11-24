@@ -48,6 +48,8 @@ class ScaleObservation(StrictModel):
     stable: bool
     status: str
     unit: Literal["g"]
+    device_session_id: str = Field(min_length=1, max_length=80)
+    measurement_id: str = Field(min_length=1, max_length=120)
     weight_g: float | None = Field(default=None, allow_inf_nan=False)
     weight_delta_g: float | None = Field(default=None, allow_inf_nan=False)
     stability_range_g: float | None = Field(default=None, ge=0, allow_inf_nan=False)
@@ -239,11 +241,15 @@ class TareConfigurationResponse(StrictModel):
 
 class TareRequest(StrictModel):
     mode: Literal["platform_empty", "empty_plate", "prepare_empty_plate"]
-    confirm: Literal["TARE", "PREPARE"]
+    confirm: Literal["EMPTY_PLATFORM", "EMPTY_PLATE", "PREPARE"]
 
     @model_validator(mode="after")
     def require_action_specific_confirmation(self) -> "TareRequest":
-        expected = "PREPARE" if self.mode == "prepare_empty_plate" else "TARE"
+        expected = {
+            "prepare_empty_plate": "PREPARE",
+            "empty_plate": "EMPTY_PLATE",
+            "platform_empty": "EMPTY_PLATFORM",
+        }[self.mode]
         if self.confirm != expected:
             raise ValueError(f"mode {self.mode} requires confirm={expected}")
         return self
@@ -263,6 +269,7 @@ class MealItemCorrection(StrictModel):
     label: str = Field(min_length=1, max_length=120)
     weight_g: float = Field(gt=0, allow_inf_nan=False)
     nutrition_record_id: str | None = Field(default=None, min_length=1, max_length=64)
+    preparation_state: str | None = Field(default=None, min_length=1, max_length=120)
 
 
 class MealCorrectionRequest(StrictModel):
@@ -312,6 +319,16 @@ class ScanResponse(StrictModel):
     decision: AgentAction | None = None
     source: Literal["hx711", "mock"]
     simulated: bool
+    device_session_id: str | None = None
+    measurement_id: str | None = None
+    measurement_timestamp_ms: int | None = Field(default=None, ge=0)
+    stable_weight_g: float | None = Field(default=None, allow_inf_nan=False)
+    measurement_received_at: datetime | None = None
+    verified_measurement_id: str | None = None
+    verified_weight_g: float | None = Field(default=None, allow_inf_nan=False)
+    verified_timestamp_ms: int | None = Field(default=None, ge=0)
+    verified_received_at: datetime | None = None
+    capture_placement_key: str | None = None
     tare_mode: TareMode | None = None
     plate_profile_id: str | None = None
     measured_gross_weight_g: float | None = Field(default=None, allow_inf_nan=False)
@@ -362,6 +379,8 @@ class ScaleReadingResponse(StrictModel):
     sample_count: int = Field(ge=0)
     window_size: int = Field(ge=0)
     timestamp_ms: int = Field(ge=0)
+    device_session_id: str = Field(min_length=1, max_length=80)
+    measurement_id: str = Field(min_length=1, max_length=120)
     operation: str = "none"
     operation_status: str = "idle"
     operation_ok: bool | None = None

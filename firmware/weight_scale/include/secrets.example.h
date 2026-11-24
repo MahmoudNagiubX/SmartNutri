@@ -4,3 +4,5 @@
 
 #define SMARTNUTRI_WIFI_SSID ""
 #define SMARTNUTRI_WIFI_PASSWORD ""
+// Set a long, random local token in ignored secrets.h before enabling HTTP tare/calibration.
+#define SMARTNUTRI_DEVICE_TOKEN ""

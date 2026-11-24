@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import io
+import json
+import sqlite3
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -87,7 +90,13 @@ def _camera(settings: Settings) -> Any:
     if settings.camera_mode == "file" and settings.camera_file_path is not None:
         return FileCameraService(settings.camera_file_path, **options)
     if settings.camera_mode == "ip_snapshot" and settings.camera_snapshot_url:
-        return IPSnapshotCameraService(settings.camera_snapshot_url, **options)
+        if not settings.camera_allowed_host:
+            raise ValueError("SMARTNUTRI_CAMERA_ALLOWED_HOST must explicitly allow the phone IP and port")
+        return IPSnapshotCameraService(
+            settings.camera_snapshot_url,
+            allowed_host=settings.camera_allowed_host,
+            **options,
+        )
     return UnconfiguredCameraService(**options)
 
 
@@ -100,7 +109,11 @@ def _scale_client(settings: Settings) -> Any:
         return None
     from smartnutri_weight.client import WeightClient
 
-    return WeightClient(settings.scale_base_url, timeout_s=2.0)
+    return WeightClient(
+        settings.scale_base_url,
+        timeout_s=2.0,
+        device_token=settings.scale_device_token,
+    )
 
 
 def _safe_scan(scan: dict[str, Any], *, meal: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -109,6 +122,10 @@ def _safe_scan(scan: dict[str, Any], *, meal: dict[str, Any] | None = None) -> d
         key: scan.get(key)
         for key in (
             "id", "placement_key", "state", "decision", "source", "simulated",
+            "device_session_id", "measurement_id", "measurement_timestamp_ms",
+            "stable_weight_g", "measurement_received_at", "verified_measurement_id",
+            "verified_weight_g", "verified_timestamp_ms", "verified_received_at",
+            "capture_placement_key",
             "tare_mode", "plate_profile_id", "measured_gross_weight_g",
             "plate_tare_weight_g", "measured_net_food_weight_g", "capture_source",
             "capture_simulated", "image_quality", "predictions", "portions",
@@ -280,7 +297,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         require_control(request, control_token)
         active = runtime(request)
         try:
-            return await asyncio.to_thread(active.monitor.configure_tare, payload.mode)
+            return await asyncio.to_thread(
+                active.monitor.configure_tare,
+                payload.mode,
+                confirmation=payload.confirm,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=503, detail="scale device authentication is not configured") from exc
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -302,6 +325,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 payload.known_weight_g,
                 confirmation=payload.confirm,
             )
+        except PermissionError as exc:
+            raise HTTPException(status_code=503, detail="scale device authentication is not configured") from exc
         except Exception as exc:
             raise HTTPException(status_code=409, detail=f"calibration failed ({type(exc).__name__})") from exc
         return {"reading": reading.__dict__, "simulated": False}
@@ -624,8 +649,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if len({item.class_id for item in payload.items}) != len(payload.items):
             raise HTTPException(status_code=422, detail="each semantic class may appear once")
         total = sum(item.weight_g for item in payload.items)
-        if abs(total - meal["measured_net_food_weight_g"]) > 0.05:
+        if abs(total - meal["measured_net_food_weight_g"]) > active.settings.correction_weight_tolerance_g:
             raise HTTPException(status_code=422, detail="corrected portions must sum to measured net food weight")
+        selected_records: dict[int, Any] = {}
+        for item in payload.items:
+            if item.preparation_state is not None and item.nutrition_record_id is None:
+                raise HTTPException(status_code=422, detail="preparation state requires a selected nutrition record")
+            if item.nutrition_record_id is None:
+                continue
+            selected = active.nutrition.lookup_for_class(
+                item.class_id,
+                nutrition_record_id=item.nutrition_record_id,
+                simulated=meal["simulated"],
+            )
+            if selected is None:
+                raise HTTPException(status_code=422, detail="nutrition record is missing, unverified, or does not match this food class")
+            _, record = selected
+            if item.preparation_state is not None and item.preparation_state != record.preparation_state:
+                raise HTTPException(status_code=422, detail="preparation state does not match the selected nutrition record")
+            if record.requires_preparation_confirmation and item.preparation_state != record.preparation_state:
+                raise HTTPException(status_code=422, detail="selected nutrition record requires explicit preparation confirmation")
+            selected_records[item.class_id] = record
         portions = [
             PortionEstimate(
                 class_id=item.class_id,
@@ -655,41 +699,58 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             corrected_items.append(
                 {
                     "class_id": portion.class_id,
-                    "food_label": portion.label,
+                    "food_label": selected_records[portion.class_id].food_identity
+                    if portion.class_id in selected_records else portion.label,
                     "estimated_weight_g": portion.estimated_weight_g,
                     "nutrition_record_id": nutrition.nutrition_record_id if nutrition else None,
+                    "preparation_state": selected_records[portion.class_id].preparation_state
+                    if portion.class_id in selected_records else None,
                     "nutrients": nutrition.nutrients.model_dump(mode="json")
                     if nutrition and nutrition.nutrients else None,
                     "needs_review": nutrition is None or nutrition.nutrients is None,
                 }
             )
         totals = calculation.totals.model_dump(mode="json") if calculation.totals else None
-        corrected = active.repository.replace_corrected_meal(
-            meal_id=meal_id,
-            items=corrected_items,
-            totals=totals,
-            state="saved" if calculation.complete else "needs_review",
-        )
-        scan = active.repository.get_scan(meal["scan_id"])
-        assert scan is not None
         correction_result = PortionEstimationResult(
             measured_net_weight_g=meal["measured_net_food_weight_g"],
             method="user_correction",
             estimates=portions,
             allocation_complete=True,
-            review_required=False,
+            review_required=not calculation.complete,
             simulated=meal["simulated"],
         )
-        active.repository.update_scan(
-            scan["id"],
-            state="COMPLETED" if calculation.complete else "NEEDS_REVIEW",
-            decision="SAVE_MEAL" if calculation.complete else "REQUEST_FOOD_PREPARATION",
-            portions=correction_result.model_dump(mode="json"),
-            nutrition_totals=totals,
-            result_message="User portion correction was saved and nutrition recalculated."
-            if calculation.complete else "Correction saved; a verified nutrition mapping is still missing.",
+        canonical_items = sorted(
+            (item.model_dump(mode="json") for item in payload.items),
+            key=lambda item: item["class_id"],
         )
-        return corrected
+        fingerprint = hashlib.sha256(
+            json.dumps(canonical_items, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        try:
+            return active.repository.replace_corrected_meal(
+                meal_id=meal_id,
+                items=corrected_items,
+                totals=totals,
+                state="saved" if calculation.complete else "needs_review",
+                scan_update={
+                    "state": "COMPLETED" if calculation.complete else "NEEDS_REVIEW",
+                    "decision": "SAVE_MEAL" if calculation.complete else "REQUEST_FOOD_PREPARATION",
+                    "portions": correction_result.model_dump(mode="json"),
+                    "nutrition_totals": totals,
+                    "result_message": "User portion correction was saved and nutrition recalculated."
+                    if calculation.complete else "Correction saved; a verified nutrition mapping is still missing.",
+                    "error_code": None,
+                },
+                correction_fingerprint=fingerprint,
+                weight_tolerance_g=active.settings.correction_weight_tolerance_g,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except sqlite3.Error as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="correction transaction failed; no changes were saved",
+            ) from exc
 
     @app.get("/api/v1/agents/decisions/{scan_id}", response_model=AgentDecisionResponse, tags=["agent"])
     async def agent_decision(scan_id: str, request: Request) -> dict[str, Any]:

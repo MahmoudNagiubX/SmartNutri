@@ -39,7 +39,7 @@ Example explicit live plate tare:
 POST /api/v1/scale/tare
 {
   "mode": "empty_plate",
-  "confirm": "TARE"
+  "confirm": "EMPTY_PLATE"
 }
 ```
 
@@ -50,10 +50,10 @@ POST /api/v1/scale/tare
 { "mode": "prepare_empty_plate", "confirm": "PREPARE" }
 
 POST /api/v1/scale/tare
-{ "mode": "empty_plate", "confirm": "TARE" }
+{ "mode": "empty_plate", "confirm": "EMPTY_PLATE" }
 ```
 
-`mode` is `platform_empty`, `prepare_empty_plate`, or `empty_plate`. A human must ensure the platform or plate is actually empty before confirming. Preparation persists `live_tare_pending=true` and suppresses scans while the empty plate is placed. The empty-plate action requires a stable calibrated reading, records the plate's pre-tare mass, and asks the ESP32 to tare. Subsequent readings are net food mass; the backend does not subtract the plate again. Platform-empty tare can establish the initial zero for a connected but not-yet-tared HX711. Calibration requires `{ "known_weight_g": 500, "confirm": "CALIBRATE" }`; it is never called automatically.
+`mode` is `platform_empty`, `prepare_empty_plate`, or `empty_plate`. A human must ensure the platform or plate is actually empty before confirming. Preparation persists `live_tare_pending=true` and suppresses scans while the empty plate is placed. The empty-plate action requires a stable calibrated reading, records the plate's pre-tare mass, and asks the ESP32 to tare. Subsequent readings are net food mass; the backend does not subtract the plate again. Platform-empty tare can establish the initial zero for a connected but not-yet-tared HX711. Confirmations are `EMPTY_PLATFORM`, `PREPARE`, and `EMPTY_PLATE` for those three modes respectively; these are operator assertions, not device credentials. Real write requests require `X-SmartNutri-Control-Token` at the backend and a separately configured `SMARTNUTRI_SCALE_DEVICE_TOKEN` for ESP32 authentication. If the device secret is absent, the backend fails closed with HTTP 503. Calibration requires `{ "known_weight_g": 500, "confirm": "CALIBRATE" }` and both secrets; it is never automatic. The ESP32 uses plain HTTP, so the device token is not encrypted in transit. Operate only on a trusted isolated LAN with firewall restrictions.
 
 ## Automatic scan, segmentation, and portions
 
@@ -175,6 +175,16 @@ GET /api/v1/scans/active
   "decision": "REVIEW_PORTION_ESTIMATES",
   "source": "mock",
   "simulated": true,
+  "device_session_id": "mock-session",
+  "measurement_id": "mock-session-42",
+  "measurement_timestamp_ms": 4200,
+  "stable_weight_g": 750.0,
+  "measurement_received_at": "2026-11-23T12:00:00+00:00",
+  "verified_measurement_id": "mock-session-44",
+  "verified_weight_g": 750.0,
+  "verified_timestamp_ms": 4400,
+  "verified_received_at": "2026-11-23T12:00:01+00:00",
+  "capture_placement_key": "<placement-key>",
   "tare_mode": "saved_plate",
   "plate_profile_id": "<plate-profile-id>",
   "measured_gross_weight_g": 750.0,
@@ -223,16 +233,21 @@ Common environment configuration:
 | --- | --- |
 | `SMARTNUTRI_DATA_DIR` | Runtime database and image root; defaults outside the checkout under `%LOCALAPPDATA%\SmartNutri`. |
 | `SMARTNUTRI_SCALE_MODE` | `real`, `mock`, or `disabled`. |
-| `SMARTNUTRI_SCALE_URL` | ESP32 base URL for the existing `GET /weight` and `POST /tare` client. |
+| `SMARTNUTRI_SCALE_URL` | ESP32 base URL for read-only `GET /weight` and authenticated tare/calibration operations. |
+| `SMARTNUTRI_SCALE_DEVICE_TOKEN` | Local-only shared secret sent in the device-token header for ESP32 `POST /tare` and `POST /calibrate`; unset means these operations fail closed. |
 | `SMARTNUTRI_CAMERA_MODE` | `mock`, `file`, or `ip_snapshot`. |
 | `SMARTNUTRI_CAMERA_FILE` / `SMARTNUTRI_CAMERA_URL` | Test-image path or private phone snapshot URL. |
+| `SMARTNUTRI_CAMERA_ALLOWED_HOST` | Required exact phone IPv4 and port allowlist (`192.168.x.x:port`; RFC1918 ranges accepted). DNS names, public IPs, redirects, and other hosts are blocked. Reserve the phone address in the router. |
 | `SMARTNUTRI_CV_MODE` | `mock` or `segformer`. |
 | `SMARTNUTRI_CHECKPOINT_DIR` / `SMARTNUTRI_FOODSEG_ROOT` | Local checkpoint and FoodSeg103 label metadata for real inference. Files are never downloaded by the service. |
 | `SMARTNUTRI_AUTO_SCAN` | `true` to start background polling; default is `false`. |
 | `SMARTNUTRI_MIN_CLASSIFICATION_CONFIDENCE` | Minimum food-class confidence before area allocation; default is `0.55`. |
 | `SMARTNUTRI_PORTION_REVIEW_UNCERTAINTY_FRACTION` | Maximum per-item uncertainty as a fraction of total net weight before agent review; default is `0.20`. |
+| `SMARTNUTRI_WEIGHT_CHANGE_TOLERANCE_G` | Maximum allowed stable weight difference from the placement snapshot during capture/inference; default is 5 g and is not physically validated. |
+| `SMARTNUTRI_STALE_READING_TIMEOUT_S` | Maximum period without a changed device measurement ID before invalidating an active scan; default is 2 s and is not physically validated. |
+| `SMARTNUTRI_CORRECTION_WEIGHT_TOLERANCE_G` | Permitted arithmetic difference between corrected item masses and measured total; default is 0.05 g. |
 | `SMARTNUTRI_CONTROL_TOKEN` | Secret required for real write/control operations. |
 | `SMARTNUTRI_API_HOST` / `SMARTNUTRI_API_PORT` | Server launcher address and port; defaults to `127.0.0.1:8000`, and non-private/public binds are rejected. |
 | `SMARTNUTRI_CORS_ORIGINS` | Optional comma-separated explicit browser origins; empty by default and wildcards are rejected. |
 
-For hardware, use `SMARTNUTRI_SCALE_MODE=real`, set the ESP32 base URL, use the phone app's private snapshot URL, and keep auto-scan disabled until tare, calibration, camera, and local inference have been checked individually. Set `SMARTNUTRI_AUTO_SCAN=true` only after those checks. Real SegFormer mode requires an already-present local FoodSeg103 checkpoint with training metadata; if missing or inconsistent, inference fails closed for review.
+For hardware, use `SMARTNUTRI_SCALE_MODE=real`, set the ESP32 base URL and matching local device secret, configure the phone snapshot URL and exact allowlisted private IPv4/port, and keep auto-scan disabled until tare, calibration, camera, and local inference have been checked individually. Set `SMARTNUTRI_AUTO_SCAN=true` only after those checks. Real SegFormer mode requires an already-present local FoodSeg103 checkpoint with training metadata; if missing or inconsistent, inference fails closed for review. HTTP is unencrypted; do not expose either service outside a trusted private LAN.

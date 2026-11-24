@@ -22,8 +22,11 @@ class MockScaleClient:
         self.weight_g = float(weight_g)
         self.tared = True
         self.calibrated = True
+        self.session_id = "mock-backend-session"
+        self.sequence = 0
 
     def get_weight(self) -> ScaleObservation:
+        self.sequence += 1
         return ScaleObservation(
             ok=True,
             source="mock",
@@ -34,6 +37,8 @@ class MockScaleClient:
             stable=True,
             status="stable",
             unit="g",
+            device_session_id=self.session_id,
+            measurement_id=f"{self.session_id}-{self.sequence}",
             weight_g=self.weight_g,
             weight_delta_g=None,
             stability_range_g=0.0,
@@ -47,7 +52,9 @@ class MockScaleClient:
         self.weight_g = value
         return self.get_weight()
 
-    def tare(self) -> ScaleObservation:
+    def tare(self, *, confirmation: str | None = None) -> ScaleObservation:
+        if confirmation != "EMPTY":
+            raise PermissionError("tare requires explicit empty-platform confirmation")
         self.weight_g = 0.0
         self.tared = True
         return self.get_weight()
@@ -79,6 +86,8 @@ class ScaleMonitoringService:
             stable_confirmations=settings.stable_confirmations,
             removal_confirmations=settings.removal_confirmations,
             post_stability_delay_s=settings.post_stability_delay_s,
+            weight_change_tolerance_g=settings.weight_change_tolerance_g,
+            stale_reading_timeout_s=settings.stale_reading_timeout_s,
             tare_mode=tare.get("mode", "saved_plate"),
             live_plate_weight_g=(
                 tare.get("empty_plate_weight_g")
@@ -110,6 +119,8 @@ class ScaleMonitoringService:
         self._task: asyncio.Task | None = None
         self._scan_tasks: set[asyncio.Task] = set()
         self._stop = asyncio.Event()
+        if hasattr(self.workflow, "snapshot_verifier"):
+            self.workflow.snapshot_verifier = self.verify_snapshot
 
     def refresh_saved_plate_profile(self) -> None:
         profile = self.repository.get_default_plate()
@@ -160,7 +171,7 @@ class ScaleMonitoringService:
         fields = {
             "ok", "source", "simulated", "sensor_connected", "tared", "calibrated",
             "stable", "status", "unit", "weight_g", "weight_delta_g",
-            "stability_range_g", "timestamp_ms",
+            "stability_range_g", "timestamp_ms", "device_session_id", "measurement_id",
         }
         return ScaleObservation.model_validate({key: payload[key] for key in fields if key in payload})
 
@@ -181,6 +192,11 @@ class ScaleMonitoringService:
                 source=event.observation.source,
                 simulated=event.observation.simulated,
                 state=ScanState.WEIGHT_DETECTED.value,
+                device_session_id=event.observation.device_session_id,
+                measurement_id=event.observation.measurement_id,
+                measurement_timestamp_ms=event.observation.timestamp_ms,
+                stable_weight_g=event.observation.weight_g,
+                measurement_received_at=datetime.now(timezone.utc).isoformat(),
             )
             task = asyncio.create_task(
                 self._run_scan(scan["id"], event.observation),
@@ -192,7 +208,16 @@ class ScaleMonitoringService:
             self.repository.set_monitor_latched(False, None)
             scan = self.repository.get_scan_by_placement(event.placement_key)
             if event.during_scan and scan is not None:
-                self.workflow.cancel(scan["id"])
+                self.workflow.cancel(scan["id"], reason="plate_removed_during_scan")
+        elif event.kind == "invalidated":
+            scan = self.repository.get_scan_by_placement(event.placement_key)
+            if scan is not None and scan.get("state") in {
+                ScanState.WEIGHT_DETECTED.value,
+                ScanState.WAITING_FOR_STABILITY.value,
+                ScanState.CAPTURING.value,
+                ScanState.ANALYZING.value,
+            }:
+                self.workflow.cancel(scan["id"], reason=event.reason or "scale_snapshot_invalid")
         return event
 
     async def _run_scan(self, scan_id: str, observation: ScaleObservation) -> None:
@@ -217,10 +242,13 @@ class ScaleMonitoringService:
     async def inject_mock_placement(self, gross_weight_g: float) -> dict[str, Any]:
         if not self.allow_simulated or not isinstance(self.client, MockScaleClient):
             raise RuntimeError("mock placement is available only when the backend scale mode is mock")
-        observation = self.client.set_weight(gross_weight_g)
+        self.client.set_weight(gross_weight_g)
         start = time.monotonic()
+        observation = self.client.get_weight()
         await self.observe(observation, now=start)
+        observation = self.client.get_weight()
         await self.observe(observation, now=start + 0.05)
+        observation = self.client.get_weight()
         event = await self.observe(
             observation,
             now=start + max(0.1, self.settings.post_stability_delay_s + 0.1),
@@ -235,6 +263,49 @@ class ScaleMonitoringService:
         meal = self.repository.get_meal_by_scan(scan["id"])
         return {"scan": scan, "meal": meal, "simulated": True}
 
+    async def verify_snapshot(self, scan_id: str) -> str | None:
+        """Require a fresh stable measurement for the same latched placement."""
+        scan = self.repository.get_scan(scan_id)
+        if scan is None:
+            return "scan_snapshot_missing"
+        placement_key = scan["placement_key"]
+        if self.monitor.active_placement_key != placement_key:
+            return "placement_changed_during_scan"
+        if self.monitor.snapshot_invalid_reason:
+            return self.monitor.snapshot_invalid_reason
+        try:
+            raw = await asyncio.to_thread(self.client.get_weight)
+            observation = self.to_observation(raw)
+        except Exception:
+            await self.observe(None)
+            return self.monitor.snapshot_invalid_reason or "scale_disconnected"
+        await self.observe(observation)
+        if self.monitor.active_placement_key != placement_key:
+            return "plate_removed_during_scan"
+        if self.monitor.snapshot_invalid_reason:
+            return self.monitor.snapshot_invalid_reason
+        if not observation.usable_stable:
+            return "scale_unstable"
+        if observation.device_session_id != scan.get("device_session_id"):
+            return "scale_device_restarted"
+        if observation.measurement_id == scan.get("measurement_id"):
+            return "scale_reading_stale"
+        if (
+            observation.weight_g is None
+            or scan.get("stable_weight_g") is None
+            or abs(observation.weight_g - float(scan["stable_weight_g"]))
+            > self.settings.weight_change_tolerance_g
+        ):
+            return "weight_changed_during_scan"
+        self.repository.update_scan(
+            scan_id,
+            verified_measurement_id=observation.measurement_id,
+            verified_weight_g=observation.weight_g,
+            verified_timestamp_ms=observation.timestamp_ms,
+            verified_received_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return None
+
     async def inject_mock_removal(self) -> None:
         if not self.allow_simulated or not isinstance(self.client, MockScaleClient):
             raise RuntimeError("mock removal is available only when the backend scale mode is mock")
@@ -248,11 +319,18 @@ class ScaleMonitoringService:
         for index in range(self.settings.removal_confirmations):
             await self.observe(observation, now=start + index * 0.1)
 
-    def configure_tare(self, mode: str) -> dict[str, Any]:
+    def configure_tare(self, mode: str, *, confirmation: str | None = None) -> dict[str, Any]:
         if self.client is None:
             raise RuntimeError("scale is not configured")
         if self.monitor.latched:
             raise RuntimeError("remove the current plate before changing tare mode")
+        expected_confirmation = {
+            "prepare_empty_plate": "PREPARE",
+            "empty_plate": "EMPTY_PLATE",
+            "platform_empty": "EMPTY_PLATFORM",
+        }.get(mode)
+        if confirmation != expected_confirmation:
+            raise PermissionError(f"tare operation requires confirmation={expected_confirmation}")
         current = self.to_observation(self.client.get_weight())
         tare_config = self.repository.get_tare_configuration()
         if mode == "prepare_empty_plate":
@@ -293,7 +371,7 @@ class ScaleMonitoringService:
             tare_mode = "saved_plate"
         else:
             raise ValueError("tare mode must be platform_empty or empty_plate")
-        result = self.client.tare()
+        result = self.client.tare(confirmation="EMPTY")
         if isinstance(result, ScaleObservation):
             if result.simulated != current.simulated:
                 raise RuntimeError("tare result source does not match the current scale source")

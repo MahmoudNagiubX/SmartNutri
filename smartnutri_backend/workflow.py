@@ -5,7 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from PIL import Image
 
@@ -45,13 +45,17 @@ class ScanWorkflow:
         self.nutrition = nutrition
         self.image_dir = Path(image_dir)
         self._cancelled: dict[str, asyncio.Event] = {}
+        self._cancel_reasons: dict[str, str] = {}
         self._busy: set[str] = set()
+        self.snapshot_verifier: Callable[[str], Awaitable[str | None]] | None = None
 
-    def cancel(self, scan_id: str) -> None:
+    def cancel(self, scan_id: str, *, reason: str = "plate_removed_during_scan") -> None:
+        self._cancel_reasons[scan_id] = reason
         self._cancelled.setdefault(scan_id, asyncio.Event()).set()
 
     def finish(self, scan_id: str) -> None:
         self._cancelled.pop(scan_id, None)
+        self._cancel_reasons.pop(scan_id, None)
 
     async def process(
         self,
@@ -78,7 +82,7 @@ class ScanWorkflow:
         if scan is None:
             raise KeyError(scan_id)
         if cancelled.is_set():
-            return self._mark_removed(scan_id)
+            return self._mark_snapshot_invalid(scan_id, self._cancel_reasons.get(scan_id, "scale_snapshot_invalid"))
         self.repository.update_scan(scan_id, state=ScanState.CAPTURING.value)
         tare_config = self.repository.get_tare_configuration()
         plate_profile = self.repository.get_default_plate()
@@ -120,9 +124,17 @@ class ScanWorkflow:
             state=ScanState.CAPTURING.value,
         )
 
+        snapshot_problem = await self._verify_snapshot(scan_id)
+        if snapshot_problem:
+            return self._mark_snapshot_invalid(scan_id, snapshot_problem)
+
         try:
             capture = await asyncio.to_thread(self.camera.capture_best)
         except (CameraUnavailable, ImageQualityError) as exc:
+            if cancelled.is_set():
+                return self._mark_snapshot_invalid(
+                    scan_id, self._cancel_reasons.get(scan_id, "scale_snapshot_invalid")
+                )
             quality = exc.quality.model_dump(mode="json") if isinstance(exc, ImageQualityError) and exc.quality else None
             decision = self.agent.decide(
                 AgentContext(
@@ -142,24 +154,36 @@ class ScanWorkflow:
             )
 
         if cancelled.is_set():
-            return self._mark_removed(scan_id)
+            return self._mark_snapshot_invalid(
+                scan_id, self._cancel_reasons.get(scan_id, "scale_snapshot_invalid")
+            )
+        snapshot_problem = await self._verify_snapshot(scan_id)
+        if snapshot_problem:
+            return self._mark_snapshot_invalid(scan_id, snapshot_problem)
         capture_path = self._store(scan_id, "capture.jpg", capture.image_bytes)
         self.repository.update_scan(
             scan_id,
             capture_source=capture.source,
             capture_simulated=capture.simulated,
+            capture_placement_key=scan["placement_key"],
             capture_path=str(capture_path),
             image_quality=capture.quality.model_dump(mode="json"),
             state=ScanState.ANALYZING.value,
         )
         if cancelled.is_set():
-            return self._mark_removed(scan_id)
+            return self._mark_snapshot_invalid(
+                scan_id, self._cancel_reasons.get(scan_id, "scale_snapshot_invalid")
+            )
 
         try:
             segmentation: SegmentationResult = await asyncio.to_thread(
                 self.inference.infer, capture, scan_id=scan_id
             )
         except Exception as exc:
+            if cancelled.is_set():
+                return self._mark_snapshot_invalid(
+                    scan_id, self._cancel_reasons.get(scan_id, "scale_snapshot_invalid")
+                )
             return self._mark_review(
                 scan_id,
                 self.agent.decide(
@@ -176,7 +200,12 @@ class ScanWorkflow:
                 image_quality=capture.quality.model_dump(mode="json"),
             )
         if cancelled.is_set():
-            return self._mark_removed(scan_id)
+            return self._mark_snapshot_invalid(
+                scan_id, self._cancel_reasons.get(scan_id, "scale_snapshot_invalid")
+            )
+        snapshot_problem = await self._verify_snapshot(scan_id)
+        if snapshot_problem:
+            return self._mark_snapshot_invalid(scan_id, snapshot_problem)
 
         self._store(scan_id, "mask.png", segmentation.semantic_mask_png)
         annotated_path = self._store(scan_id, "annotated.jpg", segmentation.annotated_image_bytes)
@@ -253,6 +282,14 @@ class ScanWorkflow:
             nutrition_calculation.totals.model_dump(mode="json")
             if nutrition_complete and nutrition_calculation.totals else None
         )
+        snapshot_problem = await self._verify_snapshot(scan_id)
+        if snapshot_problem or cancelled.is_set():
+            return self._mark_snapshot_invalid(
+                scan_id,
+                snapshot_problem or self._cancel_reasons.get(scan_id, "scale_snapshot_invalid"),
+            )
+        if scan["placement_key"] != self.repository.get_scan(scan_id).get("capture_placement_key"):
+            return self._mark_snapshot_invalid(scan_id, "capture_placement_mismatch")
         self.repository.update_scan(
             scan_id,
             state=state,
@@ -323,6 +360,38 @@ class ScanWorkflow:
             ),
             result_message="Plate was removed before analysis completed.",
             error_code="plate_removed_during_scan",
+        )
+
+    async def _verify_snapshot(self, scan_id: str) -> str | None:
+        if self.snapshot_verifier is None:
+            return "scan_snapshot_verifier_unavailable"
+        try:
+            return await self.snapshot_verifier(scan_id)
+        except Exception:
+            return "scale_snapshot_verification_failed"
+
+    def _mark_snapshot_invalid(self, scan_id: str, reason: str) -> dict[str, Any]:
+        messages = {
+            "plate_removed_during_scan": "Plate was removed before scan analysis completed.",
+            "weight_changed_during_scan": "Scale weight changed during capture or analysis; this scan was rejected.",
+            "scale_disconnected": "Scale disconnected during capture or analysis; this scan was rejected.",
+            "scale_sensor_error": "Scale reported a sensor error during analysis; this scan was rejected.",
+            "scale_overload": "Scale reported overload during analysis; this scan was rejected.",
+            "scale_unstable": "Scale became unstable during analysis; this scan was rejected.",
+            "scale_reading_stale": "Scale readings became stale during analysis; this scan was rejected.",
+            "scale_device_restarted": "Scale restarted during analysis; this scan was rejected.",
+            "capture_placement_mismatch": "Captured image could not be verified against this placement.",
+        }
+        return self._mark_review(
+            scan_id,
+            AgentDecision(
+                action=AgentAction.RETRY_WEIGHT,
+                rationale=messages.get(reason, "Scale snapshot changed or could not be verified; retry this scan."),
+                requires_user=True,
+                retryable=True,
+            ),
+            result_message=messages.get(reason, "Scale snapshot changed or could not be verified; retry this scan."),
+            error_code=reason,
         )
 
     def _store(self, scan_id: str, filename: str, content: bytes) -> Path:

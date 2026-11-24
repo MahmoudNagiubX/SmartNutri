@@ -252,39 +252,56 @@ class FileCameraService(CameraService):
         return raw
 
 
-class _PrivateNetworkRedirectHandler(urllib.request.HTTPRedirectHandler):
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, message, headers, new_url):
-        try:
-            IPSnapshotCameraService._validate_url(new_url)
-        except ValueError as exc:
-            raise CameraUnavailable("phone camera redirect target is outside the private network") from exc
-        return super().redirect_request(request, fp, code, message, headers, new_url)
+        raise CameraUnavailable("phone camera redirects are disabled")
 
 
 class IPSnapshotCameraService(CameraService):
     source = "ip_snapshot"
     simulated = False
 
-    def __init__(self, snapshot_url: str, **kwargs: Any) -> None:
+    def __init__(self, snapshot_url: str, *, allowed_host: str | None = None, **kwargs: Any) -> None:
         self.snapshot_url = snapshot_url
-        self._validate_url(snapshot_url)
+        self.allowed_host, self.allowed_port = self._parse_allowed_host(allowed_host)
+        self._validate_url(snapshot_url, self.allowed_host, self.allowed_port)
         super().__init__(**kwargs)
 
     @staticmethod
-    def _validate_url(snapshot_url: str) -> None:
+    def _parse_allowed_host(allowed_host: str) -> tuple[str, int]:
+        if not isinstance(allowed_host, str) or not allowed_host.strip():
+            raise ValueError("camera allowed host must be configured as a private IPv4 address and port")
+        parsed = urllib.parse.urlsplit(f"http://{allowed_host.strip()}")
+        if parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
+            raise ValueError("camera allowed host must contain only an IPv4 address and port")
+        try:
+            address = ipaddress.IPv4Address(parsed.hostname or "")
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("camera allowed host must be a literal private IPv4 address") from exc
+        if port is None or not any(
+            address in ipaddress.IPv4Network(network)
+            for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+        ):
+            raise ValueError("camera allowed host must use an RFC1918 IPv4 address and explicit port")
+        return str(address), port
+
+    @staticmethod
+    def _validate_url(snapshot_url: str, allowed_host: str, allowed_port: int) -> None:
         parsed = urllib.parse.urlsplit(snapshot_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("camera URL must be an HTTP(S) snapshot URL")
+        if parsed.scheme != "http" or not parsed.hostname:
+            raise ValueError("camera URL must be an HTTP snapshot URL on the trusted LAN")
         if parsed.username or parsed.password:
             raise ValueError("camera URL credentials must not be embedded in the URL")
-        host = parsed.hostname.casefold()
-        is_lan_host = host in {"localhost", "localhost.localdomain"} or host.endswith(".local")
+        if parsed.query or parsed.fragment:
+            raise ValueError("camera URL query strings and fragments are not allowed")
         try:
-            is_lan_host = is_lan_host or ipaddress.ip_address(host).is_private or ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            pass
-        if not is_lan_host:
-            raise ValueError("camera snapshot URL must point to a private LAN or .local host")
+            host = str(ipaddress.IPv4Address(parsed.hostname))
+            port = parsed.port or 80
+        except ValueError as exc:
+            raise ValueError("camera URL must use a literal private IPv4 address") from exc
+        if host != allowed_host or port != allowed_port:
+            raise ValueError("camera URL host and port must exactly match SMARTNUTRI_CAMERA_ALLOWED_HOST")
 
     def status(self) -> dict[str, Any]:
         return {**super().status(), "transport": "http_snapshot", "reachable": None}
@@ -298,13 +315,14 @@ class IPSnapshotCameraService(CameraService):
         try:
             opener = urllib.request.build_opener(
                 urllib.request.ProxyHandler({}),
-                _PrivateNetworkRedirectHandler(),
+                _NoRedirectHandler(),
             )
             with opener.open(request, timeout=self.timeout_s) as response:
-                try:
-                    self._validate_url(response.geturl())
-                except ValueError as exc:
-                    raise CameraUnavailable("phone camera redirected outside the configured private network") from exc
+                if response.geturl() != self.snapshot_url:
+                    raise CameraUnavailable("phone camera response URL does not match the configured endpoint")
+                content_type = response.headers.get_content_type().casefold()
+                if content_type not in {"image/jpeg", "image/png", "image/webp", "application/octet-stream"}:
+                    raise ImageQualityError("camera response is not an image payload")
                 declared_size = response.headers.get("Content-Length")
                 if declared_size:
                     try:

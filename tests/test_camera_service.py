@@ -1,8 +1,10 @@
 import io
+import email.message
 import tempfile
 import unittest
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
@@ -13,7 +15,7 @@ from smartnutri_backend.camera import (
     ImageQualityError,
     IPSnapshotCameraService,
     MockCameraService,
-    _PrivateNetworkRedirectHandler,
+    _NoRedirectHandler,
 )
 
 
@@ -116,22 +118,85 @@ class CameraServiceTests(unittest.TestCase):
             self.assertTrue(capture.quality.acceptable)
 
     def test_ip_snapshot_adapter_allows_lan_and_rejects_public_or_credential_urls(self):
-        camera = IPSnapshotCameraService("http://192.168.1.20:8080/photo.jpg")
+        camera = IPSnapshotCameraService(
+            "http://192.168.1.20:8080/photo.jpg",
+            allowed_host="192.168.1.20:8080",
+        )
         self.assertTrue(camera.status()["configured"])
         for url in (
             "http://8.8.8.8/photo.jpg",
             "http://user:password@192.168.1.20/photo.jpg",
+            "http://192.168.1.21:8080/photo.jpg",
+            "http://192.168.1.20:8081/photo.jpg",
+            "http://localhost:8080/photo.jpg",
+            "http://camera.local:8080/photo.jpg",
+            "http://127.0.0.1:8080/photo.jpg",
+            "http://192.168.1.20:8080/photo.jpg?token=secret",
         ):
             with self.subTest(url=url), self.assertRaises(ValueError):
-                IPSnapshotCameraService(url)
+                IPSnapshotCameraService(url, allowed_host="192.168.1.20:8080")
+        with self.assertRaises(ValueError):
+            IPSnapshotCameraService("http://192.168.1.20:8080/photo.jpg")
 
-    def test_ip_snapshot_blocks_public_redirect_before_following_it(self):
-        camera = IPSnapshotCameraService("http://192.168.1.20:8080/photo.jpg")
+    def test_ip_snapshot_blocks_all_redirects(self):
+        camera = IPSnapshotCameraService(
+            "http://192.168.1.20:8080/photo.jpg",
+            allowed_host="192.168.1.20:8080",
+        )
         request = urllib.request.Request(camera.snapshot_url)
         with self.assertRaises(CameraUnavailable):
-            _PrivateNetworkRedirectHandler().redirect_request(
+            _NoRedirectHandler().redirect_request(
                 request, None, 302, "Found", {}, "http://8.8.8.8/redirected.jpg"
             )
+        with self.assertRaises(CameraUnavailable):
+            _NoRedirectHandler().redirect_request(
+                request, None, 302, "Found", {}, "http://192.168.1.20:8080/other.jpg"
+            )
+
+    def test_ip_snapshot_checks_response_size_and_content_type(self):
+        class FakeResponse:
+            def __init__(self, data, content_type="image/jpeg"):
+                self.data = data
+                self.headers = email.message.Message()
+                self.headers["Content-Type"] = content_type
+                self.headers["Content-Length"] = str(len(data))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def geturl(self):
+                return "http://192.168.1.20:8080/photo.jpg"
+
+            def read(self, _count):
+                return self.data
+
+        class FakeOpener:
+            def __init__(self, response):
+                self.response = response
+
+            def open(self, *_args, **_kwargs):
+                return self.response
+
+        camera = IPSnapshotCameraService(
+            "http://192.168.1.20:8080/photo.jpg",
+            allowed_host="192.168.1.20:8080",
+            max_image_bytes=8,
+        )
+        with patch(
+            "smartnutri_backend.camera.urllib.request.build_opener",
+            return_value=FakeOpener(FakeResponse(b"123456789")),
+        ):
+            with self.assertRaises(ImageQualityError):
+                camera.capture_raw()
+        with patch(
+            "smartnutri_backend.camera.urllib.request.build_opener",
+            return_value=FakeOpener(FakeResponse(b"image", "text/html")),
+        ):
+            with self.assertRaises(ImageQualityError):
+                camera.capture_raw()
 
 
 if __name__ == "__main__":

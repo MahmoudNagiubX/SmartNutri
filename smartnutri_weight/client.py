@@ -29,6 +29,8 @@ _REQUIRED_FIELDS = (
     "sample_count",
     "window_size",
     "timestamp_ms",
+    "device_session_id",
+    "measurement_id",
 )
 _REAL_STATUSES = {
     "sensor_disconnected",
@@ -90,6 +92,8 @@ class WeightReading:
     sample_count: int
     window_size: int
     timestamp_ms: int
+    device_session_id: str
+    measurement_id: str
     operation: str = "none"
     operation_status: str = "idle"
     operation_ok: bool | None = None
@@ -153,6 +157,12 @@ class WeightReading:
             else:
                 operation_status = "pending"
         operation_message = payload.get("operation_message", payload.get("message", "idle"))
+        device_session_id = payload["device_session_id"]
+        measurement_id = payload["measurement_id"]
+        if not isinstance(device_session_id, str) or not device_session_id or len(device_session_id) > 80:
+            raise ValueError("device_session_id must be a non-empty string of at most 80 characters")
+        if not isinstance(measurement_id, str) or not measurement_id or len(measurement_id) > 120:
+            raise ValueError("measurement_id must be a non-empty string of at most 120 characters")
         if not isinstance(operation, str) or operation not in {"none", "tare", "calibrate"}:
             raise ValueError("operation must be none, tare, or calibrate")
         if not isinstance(operation_status, str) or operation_status not in {
@@ -247,6 +257,8 @@ class WeightReading:
             sample_count=sample_count,
             window_size=window_size,
             timestamp_ms=_integer(payload, "timestamp_ms"),
+            device_session_id=device_session_id,
+            measurement_id=measurement_id,
             operation=operation,
             operation_status=operation_status,
             operation_ok=operation_ok,
@@ -271,6 +283,7 @@ class WeightClient:
         operation_timeout_s: float = 10.0,
         max_get_retries: int = 1,
         retry_delay_s: float = 0.1,
+        device_token: str | None = None,
     ) -> None:
         if not math.isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError("timeout_s must be finite and positive")
@@ -285,8 +298,10 @@ class WeightClient:
         self.operation_timeout_s = float(operation_timeout_s)
         self.max_get_retries = max_get_retries
         self.retry_delay_s = float(retry_delay_s)
+        self.device_token = device_token
         self.mock_weight_g = self._finite_weight(mock_weight_g) if mock_weight_g is not None else None
         self._mock_last_weight_g: float | None = None
+        self._mock_sequence = 0
         if self.mock_weight_g is None and not self.base_url:
             raise ValueError("base_url is required unless mock_weight_g is provided")
 
@@ -346,12 +361,14 @@ class WeightClient:
                 raise TimeoutError("scale did not produce a stable reading before timeout")
             time.sleep(min(poll_interval_s, remaining))
 
-    def tare(self) -> WeightReading:
+    def tare(self, *, confirmation: str | None = None) -> WeightReading:
+        if confirmation != "EMPTY":
+            raise PermissionError("tare requires confirmation='EMPTY'")
         if self.mock_weight_g is not None:
             self.mock_weight_g = 0.0
             self._mock_last_weight_g = None
             return self._mock_reading()
-        payload = self._request("POST", "/tare", form={})
+        payload = self._request("POST", "/tare", form={"confirm": confirmation})
         return self._await_operation(payload, "tare")
 
     def calibrate(self, known_weight_g: float, *, confirmation: str | None = None) -> WeightReading:
@@ -430,17 +447,25 @@ class WeightClient:
             "sample_count": 0,
             "window_size": 10,
             "timestamp_ms": 0,
+            "device_session_id": "mock-session",
+            "measurement_id": f"mock-{self._mock_sequence + 1}",
             "operation": "none",
             "operation_status": "idle",
             "operation_ok": None,
             "operation_message": "idle",
         }
+        self._mock_sequence += 1
         self._mock_last_weight_g = self.mock_weight_g
         return WeightReading.from_payload(payload)
 
     def _request(self, method: str, path: str, *, form: dict[str, str] | None = None) -> dict[str, Any]:
+        protected_operation = method.upper() == "POST" and path in {"/tare", "/calibrate"}
+        if protected_operation and (not self.device_token or not self.device_token.strip()):
+            raise PermissionError("scale device token is required for tare or calibration")
         data = urlencode(form).encode("ascii") if form is not None else None
         headers = {"Accept": "application/json"}
+        if protected_operation:
+            headers["X-SmartNutri-Device-Token"] = str(self.device_token)
         if form is not None:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         request = Request(self.base_url + path, data=data, headers=headers, method=method)
@@ -452,6 +477,8 @@ class WeightClient:
                 break
             except HTTPError as exc:
                 details = exc.read().decode("utf-8", errors="replace")
+                if protected_operation:
+                    raise RuntimeError(f"weight API operation failed with HTTP {exc.code}") from exc
                 if method.upper() == "GET" and 500 <= exc.code < 600 and attempt + 1 < attempts:
                     time.sleep(self.retry_delay_s * (attempt + 1))
                     continue

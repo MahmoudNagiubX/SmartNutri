@@ -14,6 +14,7 @@ class MonitorEvent:
     placement_key: str
     observation: ScaleObservation | None = None
     during_scan: bool = False
+    reason: str | None = None
 
 
 class ScaleMonitor:
@@ -33,8 +34,16 @@ class ScaleMonitor:
         live_tare_pending: bool = False,
         allow_simulated: bool = False,
         restored_latch: dict | None = None,
+        weight_change_tolerance_g: float = 5.0,
+        stale_reading_timeout_s: float = 2.0,
     ) -> None:
-        values = (placement_threshold_g, removal_threshold_g, post_stability_delay_s)
+        values = (
+            placement_threshold_g,
+            removal_threshold_g,
+            post_stability_delay_s,
+            weight_change_tolerance_g,
+            stale_reading_timeout_s,
+        )
         if any(not math.isfinite(value) or value < 0 for value in values):
             raise ValueError("scale monitor thresholds and delay must be finite and non-negative")
         if placement_threshold_g <= removal_threshold_g:
@@ -63,6 +72,8 @@ class ScaleMonitor:
         self.stable_confirmations = stable_confirmations
         self.removal_confirmations = removal_confirmations
         self.post_stability_delay_s = float(post_stability_delay_s)
+        self.weight_change_tolerance_g = float(weight_change_tolerance_g)
+        self.stale_reading_timeout_s = float(stale_reading_timeout_s)
         self.tare_mode = tare_mode
         self.live_plate_weight_g = float(live_plate_weight_g) if live_plate_weight_g is not None else None
         self.live_tare_pending = bool(live_tare_pending)
@@ -78,6 +89,13 @@ class ScaleMonitor:
         self._stable_count = 0
         self._removal_count = 0
         self._stable_since: float | None = None
+        self._placement_weight_g: float | None = None
+        self._placement_measurement_id: str | None = None
+        self._placement_session_id: str | None = None
+        self._placement_source: str | None = None
+        self._last_measurement_id: str | None = None
+        self._last_measurement_seen_at: float | None = None
+        self._snapshot_invalid_reason: str | None = None
         self._refresh_placement_threshold()
 
     @property
@@ -145,7 +163,7 @@ class ScaleMonitor:
     ) -> MonitorEvent | None:
         current_time = time.monotonic() if now is None else float(now)
         if self.latched:
-            return self._observe_latched(observation)
+            return self._observe_latched(observation, current_time)
         if self.live_tare_pending:
             if observation is not None and observation.status in {
                 "sensor_disconnected", "sensor_error", "overload"
@@ -199,26 +217,47 @@ class ScaleMonitor:
             placement_key = str(uuid.uuid4())
             self.active_placement_key = placement_key
             self._removal_count = 0
+            self._placement_weight_g = observation.weight_g
+            self._placement_measurement_id = observation.measurement_id
+            self._placement_session_id = observation.device_session_id
+            self._placement_source = observation.source
+            self._last_measurement_id = observation.measurement_id
+            self._last_measurement_seen_at = current_time
+            self._snapshot_invalid_reason = None
             self.state = ScanState.CAPTURING
             return MonitorEvent("capture", placement_key, observation)
         return None
 
-    def _observe_latched(self, observation: ScaleObservation | None) -> MonitorEvent | None:
-        if observation is None or not observation.usable_stable:
+    def _observe_latched(
+        self,
+        observation: ScaleObservation | None,
+        current_time: float,
+    ) -> MonitorEvent | None:
+        key = self.active_placement_key or ""
+        active_scan = self.state in {ScanState.CAPTURING, ScanState.ANALYZING}
+        if observation is None:
             self._removal_count = 0
-            if observation is not None and observation.status in {
-                "sensor_disconnected", "sensor_error", "overload"
-            }:
-                self.last_error = observation.status
-            return None
+            self.last_error = "scale_unavailable"
+            return self._invalidate(key, "scale_disconnected") if active_scan else None
+        if not observation.usable_stable:
+            self._removal_count = 0
+            self.last_error = observation.status
+            reason = {
+                "sensor_disconnected": "scale_disconnected",
+                "sensor_error": "scale_sensor_error",
+                "overload": "scale_overload",
+            }.get(observation.status, "scale_unstable")
+            return self._invalidate(key, reason) if active_scan else None
         self.last_error = None
         if observation.source == "mock" and not self.allow_simulated:
             self._removal_count = 0
-            return None
+            return self._invalidate(key, "scale_source_changed") if active_scan else None
+        if observation.source != self._placement_source:
+            return self._invalidate(key, "scale_source_changed") if active_scan else None
         weight = observation.weight_g
         if weight is None:
             self._removal_count = 0
-            return None
+            return self._invalidate(key, "scale_reading_invalid") if active_scan else None
         if self.tare_mode == "live_plate":
             assert self.live_plate_weight_g is not None
             tolerance_g = min(self.removal_threshold_g, self.live_plate_weight_g * 0.05)
@@ -227,20 +266,56 @@ class ScaleMonitor:
             removed_sample = abs(weight) <= self.removal_threshold_g
         if not removed_sample:
             self._removal_count = 0
+        else:
+            self._removal_count += 1
+            invalidation = self._invalidate(key, "plate_removed_during_scan") if active_scan else None
+            if self._removal_count < self.removal_confirmations:
+                return invalidation
+
+        if active_scan and not removed_sample:
+            if observation.device_session_id != self._placement_session_id:
+                return self._invalidate(key, "scale_device_restarted")
+            if observation.measurement_id != self._last_measurement_id:
+                self._last_measurement_id = observation.measurement_id
+                self._last_measurement_seen_at = current_time
+            elif (
+                self._last_measurement_seen_at is not None
+                and current_time - self._last_measurement_seen_at > self.stale_reading_timeout_s
+            ):
+                return self._invalidate(key, "scale_reading_stale")
+            if (
+                self._placement_weight_g is not None
+                and abs(weight - self._placement_weight_g) > self.weight_change_tolerance_g
+            ):
+                return self._invalidate(key, "weight_changed_during_scan")
+        if not removed_sample:
             return None
 
-        self._removal_count += 1
-        if self._removal_count < self.removal_confirmations:
-            return None
-        key = self.active_placement_key
         during_scan = self.state in {ScanState.CAPTURING, ScanState.ANALYZING}
         self.active_placement_key = None
         self.state = ScanState.IDLE
         self._removal_count = 0
         self._stable_count = 0
         self._stable_since = None
+        self._placement_weight_g = None
+        self._placement_measurement_id = None
+        self._placement_session_id = None
+        self._placement_source = None
+        self._last_measurement_id = None
+        self._last_measurement_seen_at = None
+        self._snapshot_invalid_reason = None
         self.last_error = None
         return MonitorEvent("removed", key or "", observation, during_scan)
+
+    @property
+    def snapshot_invalid_reason(self) -> str | None:
+        return self._snapshot_invalid_reason
+
+    def _invalidate(self, placement_key: str, reason: str) -> MonitorEvent | None:
+        if self._snapshot_invalid_reason is not None:
+            return None
+        self._snapshot_invalid_reason = reason
+        return MonitorEvent("invalidated", placement_key, reason=reason, during_scan=True)
 
     def _reset_candidate(self, *, preserve_candidate: bool) -> None:
         self._stable_count = 0

@@ -31,12 +31,14 @@ class Settings:
     scale_base_url: str | None = None
     camera_mode: str = "mock"
     camera_snapshot_url: str | None = None
+    camera_allowed_host: str | None = None
     camera_file_path: Path | None = None
     segmentation_mode: str = "mock"
     checkpoint_dir: Path | None = None
     foodseg_root: Path | None = None
     preprocessing_config_path: Path = Path(__file__).resolve().parents[1] / "configs" / "image_processing" / "baseline.json"
-    control_token: str | None = None
+    control_token: str | None = field(default=None, repr=False)
+    scale_device_token: str | None = field(default=None, repr=False)
     cors_origins: tuple[str, ...] = ()
     auto_scan_enabled: bool = False
     scale_poll_interval_s: float = 0.25
@@ -45,6 +47,9 @@ class Settings:
     stable_confirmations: int = 2
     removal_confirmations: int = 3
     post_stability_delay_s: float = 1.0
+    weight_change_tolerance_g: float = 5.0
+    stale_reading_timeout_s: float = 2.0
+    correction_weight_tolerance_g: float = 0.05
     camera_timeout_s: float = 4.0
     capture_retries: int = 2
     capture_burst_count: int = 1
@@ -69,6 +74,7 @@ class Settings:
         positive = (
             "scale_poll_interval_s", "placement_threshold_g", "removal_threshold_g",
             "camera_timeout_s", "post_stability_delay_s", "min_brightness",
+            "stale_reading_timeout_s",
         )
         for name in positive:
             value = getattr(self, name)
@@ -76,6 +82,10 @@ class Settings:
                 raise ValueError(f"{name} must be positive")
         if self.removal_threshold_g >= self.placement_threshold_g:
             raise ValueError("removal threshold must be lower than placement threshold")
+        for name in ("weight_change_tolerance_g", "correction_weight_tolerance_g"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
         if self.stable_confirmations < 1 or self.removal_confirmations < 1:
             raise ValueError("confirmation counts must be positive")
         if self.capture_retries < 0 or self.capture_burst_count < 1:
@@ -130,11 +140,13 @@ class Settings:
             scale_base_url=scale_url,
             camera_mode=os.environ.get("SMARTNUTRI_CAMERA_MODE", "mock"),
             camera_snapshot_url=os.environ.get("SMARTNUTRI_CAMERA_URL") or None,
+            camera_allowed_host=os.environ.get("SMARTNUTRI_CAMERA_ALLOWED_HOST") or None,
             camera_file_path=optional_path("SMARTNUTRI_CAMERA_FILE"),
             segmentation_mode=os.environ.get("SMARTNUTRI_CV_MODE", "mock"),
             checkpoint_dir=optional_path("SMARTNUTRI_CHECKPOINT_DIR"),
             foodseg_root=optional_path("SMARTNUTRI_FOODSEG_ROOT"),
             control_token=os.environ.get("SMARTNUTRI_CONTROL_TOKEN") or None,
+            scale_device_token=os.environ.get("SMARTNUTRI_SCALE_DEVICE_TOKEN") or None,
             cors_origins=origins,
             auto_scan_enabled=_env_bool("SMARTNUTRI_AUTO_SCAN", default=False),
             scale_poll_interval_s=float(os.environ.get("SMARTNUTRI_SCALE_POLL_INTERVAL", "0.25")),
@@ -143,6 +155,9 @@ class Settings:
             stable_confirmations=int(os.environ.get("SMARTNUTRI_STABLE_CONFIRMATIONS", "2")),
             removal_confirmations=int(os.environ.get("SMARTNUTRI_REMOVAL_CONFIRMATIONS", "3")),
             post_stability_delay_s=float(os.environ.get("SMARTNUTRI_SETTLING_DELAY", "1.0")),
+            weight_change_tolerance_g=float(os.environ.get("SMARTNUTRI_WEIGHT_CHANGE_TOLERANCE_G", "5.0")),
+            stale_reading_timeout_s=float(os.environ.get("SMARTNUTRI_STALE_READING_TIMEOUT_S", "2.0")),
+            correction_weight_tolerance_g=float(os.environ.get("SMARTNUTRI_CORRECTION_WEIGHT_TOLERANCE_G", "0.05")),
             camera_timeout_s=float(os.environ.get("SMARTNUTRI_CAMERA_TIMEOUT", "4.0")),
             capture_retries=int(os.environ.get("SMARTNUTRI_CAPTURE_RETRIES", "2")),
             capture_burst_count=int(os.environ.get("SMARTNUTRI_CAPTURE_BURST_COUNT", "1")),
