@@ -1,8 +1,8 @@
 # SmartNutri Full Project Audit
 
-Task: AUDIT-01 — pre-design and pre-frontend quality gate  
-Audit date: 2026-11-24  
-Repository: `https://github.com/MahmoudNagiubX/SmartNutri` (public by user intent)  
+Task: AUDIT-01 — pre-design and pre-frontend quality gate
+Audit date: 2026-11-24
+Repository: `https://github.com/MahmoudNagiubX/SmartNutri` (public by user intent)
 Checkout: `feature/automatic-backend`, starting commit `5164eeb982c0d0b20d4e0c36eaac1cab5aadc6f3`
 
 ## 1. Executive summary
