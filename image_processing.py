@@ -19,6 +19,9 @@ IMAGE_STD = (0.229, 0.224, 0.225)
 @dataclass(frozen=True)
 class AugmentationConfig:
     horizontal_flip_probability: float = 0.0
+    scale_probability: float = 0.0
+    scale_min: float = 1.0
+    scale_max: float = 1.0
     rotation_probability: float = 0.0
     rotation_degrees: float = 0.0
     photometric_probability: float = 1.0
@@ -33,15 +36,27 @@ class AugmentationConfig:
     def __post_init__(self) -> None:
         for name in (
             "horizontal_flip_probability",
+            "scale_probability",
             "rotation_probability",
             "photometric_probability",
             "gaussian_blur_probability",
             "gaussian_noise_probability",
         ):
             _validate_probability(name, getattr(self, name))
-        for name in ("rotation_degrees", "brightness_delta", "contrast_delta", "saturation_delta", "gaussian_blur_radius", "gaussian_noise_std"):
+        for name in (
+            "scale_min",
+            "scale_max",
+            "rotation_degrees",
+            "brightness_delta",
+            "contrast_delta",
+            "saturation_delta",
+            "gaussian_blur_radius",
+            "gaussian_noise_std",
+        ):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} cannot be negative")
+        if self.scale_min <= 0 or self.scale_max < self.scale_min:
+            raise ValueError("scale bounds must satisfy 0 < scale_min <= scale_max")
 
 
 @dataclass(frozen=True)
@@ -286,6 +301,40 @@ def preprocess_pair(
     if should_flip:
         image_canvas = image_canvas.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
         mask_canvas = mask_canvas.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+
+    if training and config.augmentation.scale_probability and (
+        rng.random() < config.augmentation.scale_probability
+    ):
+        scale_factor = rng.uniform(
+            config.augmentation.scale_min,
+            config.augmentation.scale_max,
+        )
+        if scale_factor != 1.0:
+            center_x = (config.image_size - 1) / 2.0
+            center_y = (config.image_size - 1) / 2.0
+            inverse_scale = 1.0 / scale_factor
+            transform = (
+                inverse_scale,
+                0.0,
+                center_x - inverse_scale * center_x,
+                0.0,
+                inverse_scale,
+                center_y - inverse_scale * center_y,
+            )
+            image_canvas = image_canvas.transform(
+                image_canvas.size,
+                Image.Transform.AFFINE,
+                transform,
+                resample=Image.Resampling.BILINEAR,
+                fillcolor=padding_color,
+            )
+            mask_canvas = mask_canvas.transform(
+                mask_canvas.size,
+                Image.Transform.AFFINE,
+                transform,
+                resample=Image.Resampling.NEAREST,
+                fillcolor=IGNORE_INDEX,
+            )
 
     if training and config.augmentation.rotation_probability and (
         rng.random() < config.augmentation.rotation_probability

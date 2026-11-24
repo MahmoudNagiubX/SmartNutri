@@ -5,7 +5,7 @@ import random
 from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 
 import pyarrow.parquet as pq
 import torch
@@ -45,10 +45,27 @@ class ParquetSplit:
                 self.row_groups.append((file_index, group_index, row_count))
                 self.num_rows += row_count
 
-    def iter_rows(self, *, shuffle: bool, rng: random.Random) -> Iterator[dict]:
+    def list_ids(self) -> list[int | str]:
+        """Read only sample IDs, avoiding image and mask payloads."""
+        sample_ids: list[int | str] = []
+        for file_index, group_index, _ in self.row_groups:
+            rows = pq.ParquetFile(self.files[file_index]).read_row_group(
+                group_index, columns=["id"]
+            ).to_pylist()
+            sample_ids.extend(row["id"] for row in rows)
+        return sample_ids
+
+    def iter_rows(
+        self,
+        *,
+        shuffle: bool,
+        rng: random.Random,
+        include_ids: Iterable[int | str] | None = None,
+    ) -> Iterator[dict]:
         order = list(range(len(self.row_groups)))
         if shuffle:
             rng.shuffle(order)
+        selected_ids = None if include_ids is None else {str(value) for value in include_ids}
 
         readers: dict[int, pq.ParquetFile] = {}
         for order_index in order:
@@ -61,6 +78,8 @@ class ParquetSplit:
             rows = parquet_file.read_row_group(
                 group_index, columns=["image", "label", "id"]
             ).to_pylist()
+            if selected_ids is not None:
+                rows = [row for row in rows if str(row["id"]) in selected_ids]
             if shuffle:
                 rng.shuffle(rows)
             yield from rows
@@ -148,6 +167,7 @@ class FoodSegParquetDataset(IterableDataset):
         training: bool = False,
         seed: int = 42,
         processing_config: PreprocessingConfig | None = None,
+        include_ids: Iterable[int | str] | None = None,
     ) -> None:
         super().__init__()
         self.source = ParquetSplit(foodseg_root, split)
@@ -160,16 +180,23 @@ class FoodSegParquetDataset(IterableDataset):
         self.training = training
         self.seed = seed
         self.epoch = 0
+        self.include_ids = (
+            None if include_ids is None else frozenset(str(value) for value in include_ids)
+        )
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
     def __len__(self) -> int:
-        return self.source.num_rows
+        return self.source.num_rows if self.include_ids is None else len(self.include_ids)
 
     def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
         rng = random.Random(self.seed + self.epoch)
-        for row in self.source.iter_rows(shuffle=self.training, rng=rng):
+        for row in self.source.iter_rows(
+            shuffle=self.training,
+            rng=rng,
+            include_ids=self.include_ids,
+        ):
             pixel_values, labels, _ = prepare_example(
                 row,
                 self.image_size,

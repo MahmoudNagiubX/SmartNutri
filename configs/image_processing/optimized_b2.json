@@ -1,0 +1,30 @@
+{
+  "name": "optimized_b2_training",
+  "image_size": 512,
+  "mean": [0.485, 0.456, 0.406],
+  "std": [0.229, 0.224, 0.225],
+  "augmentation": {
+    "horizontal_flip_probability": 0.5,
+    "scale_probability": 0.5,
+    "scale_min": 0.9,
+    "scale_max": 1.1,
+    "rotation_probability": 0.25,
+    "rotation_degrees": 5.0,
+    "photometric_probability": 0.5,
+    "brightness_delta": 0.1,
+    "contrast_delta": 0.1,
+    "saturation_delta": 0.08,
+    "gaussian_blur_probability": 0.05,
+    "gaussian_blur_radius": 0.5,
+    "gaussian_noise_probability": 0.05,
+    "gaussian_noise_std": 2.0
+  },
+  "enhancements": {
+    "clahe": false,
+    "clahe_clip_limit": 2.0,
+    "clahe_grid_size": 8,
+    "gamma": 1.0,
+    "denoising": false,
+    "denoising_kernel_size": 3
+  }
+}
