@@ -1,0 +1,60 @@
+{
+  "run_name": "foodseg103-segformer-b2-finetune",
+  "architecture": {
+    "name": "SegFormer-B2",
+    "encoder": "MiT-B2",
+    "depths": [3, 4, 6, 3],
+    "hidden_sizes": [64, 128, 320, 512],
+    "decoder_hidden_size": 768
+  },
+  "pretrained": {
+    "model_id": "nvidia/segformer-b2-finetuned-ade-512-512",
+    "revision": "de01bae28967510f9ddd496c60a969357195400c",
+    "artifact_file": "pytorch_model.bin",
+    "artifact_size_bytes": 110000905,
+    "artifact_sha256": "187ca07bea003a5717c63d04ea90b07f33cd033c0ebf44b4b89fce5070d6c8f3",
+    "use_safetensors": false,
+    "license_note": "NVIDIA SegFormer source-code license; research/evaluation use only, non-commercial"
+  },
+  "dataset": {
+    "num_classes": 104,
+    "ignore_index": 255,
+    "expected_train_rows": 4983,
+    "expected_external_evaluation_rows": 2135,
+    "internal_validation_fraction": 0.1,
+    "internal_validation_seed": 42,
+    "external_evaluation_split": "validation"
+  },
+  "training": {
+    "input_size": 512,
+    "max_epochs": 25,
+    "early_stopping_patience": 7,
+    "batch_size": 2,
+    "gradient_accumulation_steps": 4,
+    "effective_batch_size": 8,
+    "optimizer": "AdamW",
+    "learning_rate": 0.00002,
+    "encoder_learning_rate": 0.00001,
+    "decoder_learning_rate": 0.00002,
+    "weight_decay": 0.01,
+    "warmup_ratio": 0.05,
+    "scheduler": "polynomial",
+    "polynomial_power": 1.0,
+    "max_grad_norm": 1.0,
+    "amp_dtype": "auto",
+    "num_workers": 0,
+    "pin_memory": true,
+    "seed": 42
+  },
+  "loss": {
+    "name": "focal_plus_soft_dice",
+    "focal_gamma": 2.0,
+    "focal_weight": 0.5,
+    "dice_weight": 0.5,
+    "include_background_in_dice": false,
+    "class_weight_tempering_exponent": 0.5,
+    "class_weight_cap": 2.0,
+    "class_weight_split": "inner_training_subset_only"
+  },
+  "preprocessing_profile": "../image_processing/optimized_b2.json"
+}

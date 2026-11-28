@@ -4,7 +4,9 @@ import io
 import random
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pyarrow as pa
@@ -22,7 +24,10 @@ from train_optimized import (
     DEFAULT_CONFIG,
     create_timestamped_run_dir,
     deterministic_train_validation_split,
+    checkpoint_provenance,
+    load_foodseg_b2_checkpoint,
     load_training_config,
+    optimizer_parameter_groups,
 )
 from training_losses import FocalDiceLoss
 
@@ -34,6 +39,79 @@ def _png_bytes(image: Image.Image) -> bytes:
 
 
 class OptimizedTrainingTests(unittest.TestCase):
+    def test_finetune_config_uses_lower_separate_learning_rates(self):
+        config, _, _ = load_training_config(
+            DEFAULT_CONFIG.with_name("segformer_b2_foodseg103_finetune.json")
+        )
+
+        self.assertEqual(config["training"]["encoder_learning_rate"], 1e-5)
+        self.assertEqual(config["training"]["decoder_learning_rate"], 2e-5)
+        self.assertEqual(config["training"]["max_epochs"], 25)
+        self.assertEqual(config["training"]["early_stopping_patience"], 7)
+
+    def test_optimizer_parameter_groups_cover_encoder_and_decoder_once(self):
+        class TinySegFormer(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.segformer = torch.nn.Linear(2, 2)
+                self.decode_head = torch.nn.Linear(2, 3)
+
+        model = TinySegFormer()
+        groups = optimizer_parameter_groups(
+            model,
+            {"encoder_learning_rate": 1e-5, "decoder_learning_rate": 2e-5},
+        )
+
+        self.assertEqual([group["group_name"] for group in groups], ["encoder", "decoder"])
+        self.assertEqual([group["lr"] for group in groups], [1e-5, 2e-5])
+        grouped_parameters = [parameter for group in groups for parameter in group["params"]]
+        self.assertEqual(len(grouped_parameters), len(list(model.parameters())))
+        self.assertEqual({id(p) for p in grouped_parameters}, {id(p) for p in model.parameters()})
+
+    def test_local_checkpoint_loader_never_resolves_remote_weights(self):
+        id2label = {class_id: f"class {class_id}" for class_id in range(104)}
+        fake_model = SimpleNamespace(
+            config=SimpleNamespace(
+                id2label={str(key): value for key, value in id2label.items()},
+                label2id={value: key for key, value in id2label.items()},
+                num_labels=104,
+                depths=[3, 4, 6, 3],
+                hidden_sizes=[64, 128, 320, 512],
+                decoder_hidden_size=768,
+            ),
+            decode_head=SimpleNamespace(
+                classifier=SimpleNamespace(out_channels=104)
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            checkpoint_dir = Path(temporary)
+            with patch(
+                "train_optimized.SegformerForSemanticSegmentation.from_pretrained",
+                return_value=fake_model,
+            ) as from_pretrained:
+                loaded = load_foodseg_b2_checkpoint(checkpoint_dir, id2label)
+
+        self.assertIs(loaded, fake_model)
+        self.assertEqual(fake_model.config.semantic_loss_ignore_index, 255)
+        from_pretrained.assert_called_once_with(
+            str(checkpoint_dir.resolve()),
+            local_files_only=True,
+        )
+
+    def test_checkpoint_provenance_hashes_existing_weights(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkpoint_dir = Path(temporary)
+            (checkpoint_dir / "config.json").write_text("{}", encoding="utf-8")
+            (checkpoint_dir / "model.safetensors").write_bytes(b"model-bytes")
+
+            identity = checkpoint_provenance(checkpoint_dir)
+
+        self.assertEqual(identity["weights_file"], "model.safetensors")
+        self.assertEqual(
+            identity["weights_sha256"],
+            "357e5d6fafa34d27360fec24b4326d3534905e33c6acdee60198fb078b7b79e5",
+        )
+
     def test_pretrained_config_selects_pinned_official_pytorch_weights(self):
         config, _, _ = load_training_config(DEFAULT_CONFIG)
 

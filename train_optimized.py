@@ -45,6 +45,12 @@ def parse_args() -> argparse.Namespace:
         help="Resume from a run's last_training_state.pt checkpoint.",
     )
     parser.add_argument(
+        "--init-checkpoint",
+        type=Path,
+        default=None,
+        help="Start a new fine-tuning run from a local FoodSeg103 best_model directory.",
+    )
+    parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
     )
@@ -146,6 +152,14 @@ def validate_training_config(
         raise ValueError("max_epochs and early_stopping_patience must be positive")
     if config["loss"]["class_weight_cap"] > 2.0:
         raise ValueError("class_weight_cap must remain moderate (at most 2.0)")
+    training = config["training"]
+    has_encoder_lr = "encoder_learning_rate" in training
+    has_decoder_lr = "decoder_learning_rate" in training
+    if has_encoder_lr != has_decoder_lr:
+        raise ValueError("encoder_learning_rate and decoder_learning_rate must be set together")
+    for key in ("learning_rate", "encoder_learning_rate", "decoder_learning_rate"):
+        if key in training and (not math.isfinite(training[key]) or training[key] <= 0):
+            raise ValueError(f"{key} must be a finite positive value")
 
 
 def set_seed(seed: int) -> None:
@@ -176,19 +190,11 @@ def _normalise_model_label_map(raw: dict[Any, Any]) -> dict[int, str]:
     return {int(class_id): str(name).strip() for class_id, name in raw.items()}
 
 
-def load_foodseg_b2_model(
-    pretrained: dict[str, Any],
+def _validate_foodseg_b2_model(
+    model: SegformerForSemanticSegmentation,
     id2label: dict[int, str],
 ) -> SegformerForSemanticSegmentation:
     label2id = {name: class_id for class_id, name in id2label.items()}
-    model = SegformerForSemanticSegmentation.from_pretrained(
-        pretrained["model_id"],
-        revision=pretrained["revision"],
-        id2label=id2label,
-        label2id=label2id,
-        ignore_mismatched_sizes=True,
-        use_safetensors=bool(pretrained["use_safetensors"]),
-    )
     model_id2label = _normalise_model_label_map(model.config.id2label or {})
     model_label2id = {
         str(name).strip(): int(class_id)
@@ -213,6 +219,93 @@ def load_foodseg_b2_model(
         )
     model.config.semantic_loss_ignore_index = IGNORE_INDEX
     return model
+
+
+def load_foodseg_b2_model(
+    pretrained: dict[str, Any],
+    id2label: dict[int, str],
+) -> SegformerForSemanticSegmentation:
+    label2id = {name: class_id for class_id, name in id2label.items()}
+    model = SegformerForSemanticSegmentation.from_pretrained(
+        pretrained["model_id"],
+        revision=pretrained["revision"],
+        id2label=id2label,
+        label2id=label2id,
+        ignore_mismatched_sizes=True,
+        use_safetensors=bool(pretrained["use_safetensors"]),
+    )
+    return _validate_foodseg_b2_model(model, id2label)
+
+
+def load_foodseg_b2_checkpoint(
+    checkpoint_dir: str | Path,
+    id2label: dict[int, str],
+) -> SegformerForSemanticSegmentation:
+    checkpoint_path = Path(checkpoint_dir).expanduser().resolve()
+    if not checkpoint_path.is_dir():
+        raise FileNotFoundError(f"Local initialization checkpoint not found: {checkpoint_path}")
+    model = SegformerForSemanticSegmentation.from_pretrained(
+        str(checkpoint_path),
+        local_files_only=True,
+    )
+    return _validate_foodseg_b2_model(model, id2label)
+
+
+def checkpoint_provenance(checkpoint_dir: str | Path) -> dict[str, str]:
+    checkpoint_path = Path(checkpoint_dir).expanduser().resolve()
+    if not checkpoint_path.is_dir():
+        raise FileNotFoundError(f"Local initialization checkpoint not found: {checkpoint_path}")
+    if not (checkpoint_path / "config.json").is_file():
+        raise FileNotFoundError(f"Checkpoint config.json not found: {checkpoint_path}")
+    weights_path = next(
+        (
+            candidate
+            for candidate in (
+                checkpoint_path / "model.safetensors",
+                checkpoint_path / "pytorch_model.bin",
+            )
+            if candidate.is_file()
+        ),
+        None,
+    )
+    if weights_path is None:
+        raise FileNotFoundError(f"No supported local model weights found: {checkpoint_path}")
+    digest = hashlib.sha256()
+    with weights_path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return {
+        "path": str(checkpoint_path),
+        "weights_file": weights_path.name,
+        "weights_sha256": digest.hexdigest(),
+    }
+
+
+def optimizer_parameter_groups(
+    model: torch.nn.Module,
+    training_config: dict[str, Any],
+) -> Any:
+    encoder_lr = training_config.get("encoder_learning_rate")
+    decoder_lr = training_config.get("decoder_learning_rate")
+    if encoder_lr is None and decoder_lr is None:
+        return model.parameters()
+    if encoder_lr is None or decoder_lr is None:
+        raise ValueError("encoder_learning_rate and decoder_learning_rate must be set together")
+    if not hasattr(model, "segformer") or not hasattr(model, "decode_head"):
+        raise ValueError("Separate learning rates require SegFormer encoder and decoder modules")
+
+    encoder_parameters = [p for p in model.segformer.parameters() if p.requires_grad]
+    decoder_parameters = [p for p in model.decode_head.parameters() if p.requires_grad]
+    all_parameters = [p for p in model.parameters() if p.requires_grad]
+    grouped_ids = [id(p) for p in encoder_parameters + decoder_parameters]
+    if len(grouped_ids) != len(set(grouped_ids)) or set(grouped_ids) != {
+        id(p) for p in all_parameters
+    }:
+        raise ValueError("SegFormer encoder/decoder parameter groups must cover trainable weights once")
+    return [
+        {"params": encoder_parameters, "lr": encoder_lr, "group_name": "encoder"},
+        {"params": decoder_parameters, "lr": decoder_lr, "group_name": "decoder"},
+    ]
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -315,6 +408,7 @@ def _run_config(
     amp_dtype: torch.dtype | None,
     class_weights: torch.Tensor,
     config_fingerprint: str,
+    initial_checkpoint: dict[str, str] | None,
 ) -> dict[str, Any]:
     return {
         "dataset": "FoodSeg103",
@@ -329,6 +423,7 @@ def _run_config(
         },
         "architecture": config["architecture"],
         "pretrained": config["pretrained"],
+        "initial_checkpoint": initial_checkpoint,
         "num_labels": len(id2label),
         "id2label": {str(key): value for key, value in id2label.items()},
         "training": config["training"],
@@ -353,7 +448,14 @@ def _run_config(
 
 def main() -> None:
     args = parse_args()
+    if args.resume is not None and args.init_checkpoint is not None:
+        raise ValueError("--resume and --init-checkpoint cannot be used together")
     config, processing_config, config_fingerprint = load_training_config(args.config)
+    initial_checkpoint = (
+        checkpoint_provenance(args.init_checkpoint)
+        if args.init_checkpoint is not None
+        else None
+    )
     foodseg_root = args.foodseg_root.expanduser().resolve()
     id2label = load_label_map(foodseg_root)
     train_source = ParquetSplit(foodseg_root, split="train")
@@ -462,7 +564,11 @@ def main() -> None:
     )
     total_updates = updates_per_epoch * config["training"]["max_epochs"]
 
-    model = load_foodseg_b2_model(config["pretrained"], id2label).to(device)
+    if args.init_checkpoint is None:
+        model = load_foodseg_b2_model(config["pretrained"], id2label)
+    else:
+        model = load_foodseg_b2_checkpoint(args.init_checkpoint, id2label)
+    model = model.to(device)
     criterion = FocalDiceLoss(
         class_weights=class_weights,
         ignore_index=IGNORE_INDEX,
@@ -473,7 +579,7 @@ def main() -> None:
     ).to(device)
     class_weights = class_weights.to(device)
     optimizer = AdamW(
-        model.parameters(),
+        optimizer_parameter_groups(model, config["training"]),
         lr=config["training"]["learning_rate"],
         weight_decay=config["training"]["weight_decay"],
     )
@@ -501,6 +607,7 @@ def main() -> None:
         amp_dtype=amp_dtype,
         class_weights=class_weights,
         config_fingerprint=config_fingerprint,
+        initial_checkpoint=initial_checkpoint,
     )
     if resume_path is None:
         _write_json(output_dir / "run_config.json", run_config)
@@ -635,6 +742,7 @@ def main() -> None:
                     "dataset": "FoodSeg103",
                     "model": config["architecture"]["name"],
                     "pretrained_model": config["pretrained"]["model_id"],
+                    "initial_checkpoint": initial_checkpoint,
                     "num_labels": len(id2label),
                     "padding_label": IGNORE_INDEX,
                     "preprocessing_config": processing_config.to_dict(),
@@ -649,6 +757,10 @@ def main() -> None:
             "train_loss": train_loss,
             "validation": validation_summary,
             "learning_rate": optimizer.param_groups[0]["lr"],
+            "learning_rates": {
+                group.get("group_name", f"group_{index}"): group["lr"]
+                for index, group in enumerate(optimizer.param_groups)
+            },
             "best_foreground_miou": best_score,
             "improved": improved,
             "seconds": time.perf_counter() - epoch_started,
