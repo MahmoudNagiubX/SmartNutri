@@ -201,7 +201,9 @@ def _train_epoch(
         should_update = (step + 1) % accumulation_steps == 0 or step + 1 == num_batches
         if should_update:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=1.0, error_if_nonfinite=True
+            )
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
@@ -386,6 +388,7 @@ def main() -> None:
     )
     total_epochs = int(training_config["max_epochs"])
     batch_size = int(training_config["batch_size"])
+    accumulation_steps = int(training_config["gradient_accumulation_steps"])
     log(
         f"Training EfficientNet-B2 on {len(train_records)} dishes; "
         f"validation={len(validation_records)}; official test reserved; "
